@@ -1,0 +1,5 @@
+streamlit>=1.38
+requests
+pyttsx3          # placeholder until kokoro-tts integration
+websocket-client  # optional for Whisper streaming
+websockets

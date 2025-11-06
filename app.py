@@ -7,21 +7,19 @@ import asyncio
 import websockets
 import pyttsx3  # placeholder for kokoro-tts
 import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
-# ---------------------------
 # CONFIG
-# ---------------------------
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "aphasia-trainer"
-TRANSCRIBER_WS = "ws://localhost:9000/transcribe"   # websocket stub for your realtime_transcriber.py
+TRANSCRIBER_WS = "ws://localhost:9000/transcribe"
+HOVER_TTS_PORT = 8765
 
 st.set_page_config(page_title="Aphasia Trainer", layout="wide")
 
-# ---------------------------
-# SPEECH OUTPUT
-# ---------------------------
+# TTS
 def speak(text: str):
-    """Simple TTS wrapper — swap to kokoro-tts later"""
     try:
         engine = pyttsx3.init()
         engine.say(text)
@@ -29,89 +27,186 @@ def speak(text: str):
     except Exception as e:
         print("TTS error:", e)
 
-# ---------------------------
-# STATE
-# ---------------------------
+class _TTSHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/_tts":
+                qs = parse_qs(parsed.query)
+                text = qs.get("text", [""])[0]
+                if text:
+                    threading.Thread(target=speak, args=(text,), daemon=True).start()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"ok")
+                return
+        except Exception:
+            pass
+        self.send_response(404); self.end_headers()
+
+def _ensure_tts_server():
+    def run():
+        try:
+            httpd = HTTPServer(("127.0.0.1", HOVER_TTS_PORT), _TTSHandler)
+            httpd.serve_forever()
+        except OSError:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
+_ensure_tts_server()
+
+# Model call
+def query_model(user_input: str):
+    system_prompt = """"
+        Du er en venlig dansk sprogtræner, der hjælper personer med afasi med at øve hverdagssamtaler. Specifikt øver vi os i dag 
+        i at købe ind hos slagteren. Du skal spille rollen som en venlig slagter der hjælper kunden.
+
+        Hvis samtalen ikke fungerer for brugeren kan du bryde ud af rollen og i stedet være en sprogterapeut der prøvet at hjælpe brugeren.
+
+        Du må gerne kommunikere med emoji og andre billeder, hvis det virker som om det er nødvendigt. Samtalen slutter når kunden har opnået 
+        deres mål som er at købe ind til et måltid ELLER har opgivet opgaven
+
+        Tal i korte, tydelige sætninger. Gentag nøgleord
+
+        Svar altid på dansk.
+
+        Når du modtager strengen \"<session_start>\", skal du begynde samtalen med en venlig dansk hilsen og foreslå 3–5 helt enkle svarmuligheder.
+
+
+        Returnér ALTID gyldig JSON med denne struktur:
+        {
+        "assistant_reply": "<din korte sætning>",
+        "text_suggestions": ["mulighed 1", "mulighed 2", "..."],
+        "emoji_suggestions": ["emoji1", "emoji2", "..."]
+        }
+
+        Krav:
+        - Kun gyldig JSON som svar. Ingen forklaringer eller tekst uden for JSON.
+        - `assistant_reply` er din tale til brugeren, max 1–2 korte sætninger.
+        - `text_suggestions` (maks 10) er naturlige danske svarmuligheder.
+        - `emoji_suggestions` (maks 10) matcher semantisk i samme rækkefølge som text_suggestions (hvis relevant).
+        - Hold en støttende, tydelig, rolig tone.
+    """
+
+    full_prompt = f"{system_prompt}\n\nBruger: {user_input}\nSvar:"
+    try:
+        resp = requests.post(
+            OLLAMA_URL,
+            json={"model": MODEL_NAME, "prompt": full_prompt, "stream": False},
+            timeout=180,
+        )
+        text = resp.text
+
+        # --- find first/last braces in any messy string
+        start = text.find("{")
+        end = text.rfind("}")
+        parsed_json = {}
+        if start != -1 and end != -1:
+            try:
+                candidate = text[start:end + 1]
+                parsed_json = json.loads(candidate)
+            except Exception as e:
+                st.error(f"⚠️ JSON parse failed: {e}")
+                st.code(candidate[:500])
+                parsed_json = {}
+        else:
+            st.error("⚠️ No JSON object found in response.")
+            st.code(text[:500])
+
+        # fallback or extract nested
+        if "response" in parsed_json and isinstance(parsed_json["response"], str):
+            try:
+                parsed_json = json.loads(parsed_json["response"])
+            except Exception as e:
+                st.error(f"⚠️ Nested JSON parse failed: {e}")
+                st.code(parsed_json["response"][:500])
+                parsed_json = {}
+
+        parsed_json.setdefault("assistant_reply", "Beklager, jeg kunne ikke forstå svaret.")
+        parsed_json.setdefault("text_suggestions", [])
+        parsed_json.setdefault("emoji_suggestions", [])
+        return parsed_json
+
+    except Exception as e:
+        st.error(f"Model error: {e}")
+        return {
+            "assistant_reply": "Beklager, der opstod en fejl.",
+            "text_suggestions": [],
+            "emoji_suggestions": [],
+        }
+
+# Session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "listening" not in st.session_state:
-    st.session_state.listening = False
 if "text_opts" not in st.session_state:
     st.session_state.text_opts = []
 if "emoji_opts" not in st.session_state:
     st.session_state.emoji_opts = []
+if "input_mode" not in st.session_state:
+    st.session_state.input_mode = "Text"
+if "listening" not in st.session_state:
+    st.session_state.listening = False
 
-# ---------------------------
-# SIDEBAR
-# ---------------------------
+# Sidebar
 with st.sidebar:
-    st.header("🎛️ Settings")
-    st.session_state.listening = st.toggle("🎙 Speech input", value=st.session_state.listening)
-    input_mode = st.radio("Input mode", ["Text", "Pictures (emoji)"])
+    st.header("🎛️ Indstillinger")
+    new_listen = st.toggle("🎙 Taleinput (WebSocket)", value=st.session_state.listening)
+    if new_listen != st.session_state.listening:
+        st.session_state.listening = new_listen
+        st.rerun()
+    new_mode = st.radio("Input-tilstand", ["Text", "Pictures (emoji)"], index=0 if st.session_state.input_mode == "Text" else 1)
+    if new_mode != st.session_state.input_mode:
+        st.session_state.input_mode = new_mode
+        st.rerun()
     st.markdown("---")
-    st.markdown("Hover a tile for 10 s to hear it read aloud.")
+    if st.button("🔄 Nulstil samtale"):
+        for k in ["messages", "text_opts", "emoji_opts"]:
+            st.session_state[k] = []
+        st.rerun()
 
-# ---------------------------
-# CHAT HISTORY
-# ---------------------------
+# Header + History
 st.title("🗣️ Aphasia Conversation Trainer")
-
 for msg in st.session_state.messages:
     avatar = "🧩" if msg["role"] == "assistant" else "👤"
     st.markdown(f"{avatar} **{msg['role'].capitalize()}:** {msg['content']}")
 
-# ---------------------------
-# BACKGROUND SPEECH LISTENER (WebSocket)
-# ---------------------------
-async def listen_ws():
+# WebSocket listener
+async def ws_task():
     try:
         async with websockets.connect(TRANSCRIBER_WS) as ws:
             while st.session_state.listening:
-                msg = await ws.recv()
-                data = json.loads(msg)
-                if "final" in data:
-                    text = data["final"]
+                data = await ws.recv()
+                try:
+                    payload = json.loads(data)
+                except Exception:
+                    payload = {}
+                if payload.get("partial"):
+                    st.write(f"🟡 Partiel: {payload['partial']}")
+                if payload.get("final"):
+                    text = payload["final"]
                     st.session_state.messages.append({"role": "user", "content": text})
+                    with st.spinner("Tænker..."):
+                        reply = query_model(text)
+                    st.session_state.messages.append({"role": "assistant", "content": reply.get("assistant_reply", "")})
+                    st.session_state.text_opts = reply.get("text_suggestions", [])
+                    st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
+                    threading.Thread(target=speak, args=(reply.get("assistant_reply", ""),), daemon=True).start()
                     st.session_state.listening = False
                     st.rerun()
-    except Exception as e:
-        print("WebSocket listener error:", e)
+    except Exception:
+        pass
 
-def start_ws_listener():
-    asyncio.run(listen_ws())
+def start_ws():
+    asyncio.run(ws_task())
 
 if st.session_state.listening:
-    threading.Thread(target=start_ws_listener, daemon=True).start()
+    threading.Thread(target=start_ws, daemon=True).start()
 
-# ---------------------------
-# MODEL CALL
-# ---------------------------
-def query_model(user_input):
-    system_prompt = (
-        """You will be speaking Danish.
-        You are helping a person with aphasia practice everyday scenarios.
-        Specifically we are practicing a visit to the butcher.
-        You will be playing the part of a helpful butcher who is helping the customer. If conversaiton breaks down completely, feel free to break character and help the user move the conversation forward with encouragment and help.
-        The conversation ends when the customer has achieved their goal of shopping for dinner OR have given up on the task."""
-    )
-
-    payload = {"model": MODEL_NAME, "prompt": f"{system_prompt}\nBruger: {user_input}\nSvar:", "stream": False}
-    resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
-    raw = resp.text.splitlines()[-1]
-    try:
-        parsed = json.loads(raw)
-        j = json.loads(parsed.get("response", "{}"))
-    except Exception:
-        j = {"assistant_reply": "Beklager, der gik noget galt.", "text_suggestions": [], "emoji_suggestions": []}
-    return j
-
-# ---------------------------
-# HANDLE USER INPUT
-# ---------------------------
-if len(st.session_state.messages) > 0 and st.session_state.messages[-1]["role"] == "user":
-    user_msg = st.session_state.messages[-1]["content"]
-    with st.spinner("Tænker..."):
-        reply = query_model(user_msg)
+# Initial greeting
+if not st.session_state.messages:
+    with st.spinner("Starter samtalen..."):
+        reply = query_model("<session_start>")
     st.session_state.messages.append({"role": "assistant", "content": reply.get("assistant_reply", "")})
     st.session_state.text_opts = reply.get("text_suggestions", [])
     st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
@@ -119,60 +214,106 @@ if len(st.session_state.messages) > 0 and st.session_state.messages[-1]["role"] 
     st.rerun()
 
 # ---------------------------
-# RENDER SUGGESTIONS + HOVER-TO-SPEAK
+# Render suggestion tiles (with debug)
 # ---------------------------
 st.markdown("### Vælg et svar:")
 
-opts = (
-    st.session_state.text_opts
-    if input_mode == "Text"
-    else st.session_state.emoji_opts or ["🥩", "🐖", "🍗", "🐟"]
-)
+def build_options():
+    opts = []
+    if st.session_state.input_mode == "Text":
+        opts = [{"display": t, "meaning": t} for t in (st.session_state.text_opts or [])]
+    else:
+        emj = st.session_state.emoji_opts or []
+        txt = st.session_state.text_opts or []
+        for i, e in enumerate(emj):
+            meaning = txt[i] if i < len(txt) else e
+            opts.append({"display": e, "meaning": meaning})
+        if not opts and txt:
+            opts = [{"display": "🗨️", "meaning": t} for t in txt[:5]]
+        if not opts:
+            opts = [{"display": "🤝", "meaning": "Hej"}]
+    return opts[:10]
 
+opts = build_options()
 cols = st.columns(min(5, len(opts)) or 1)
-for i, s in enumerate(opts):
-    btn = cols[i % 5].button(s, key=f"sugg_{i}")
-    # Inject per-tile hover listener
-    hover_id = f"hover_{i}"
-    st.markdown(
-        f"""
-        <div id="{hover_id}" onmouseover="startHoverTimer('{s}', '{hover_id}')"
-             onmouseout="cancelHoverTimer('{hover_id}')"></div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if btn:
-        st.session_state.messages.append({"role": "user", "content": s})
+
+# Debug area
+if "last_debug" not in st.session_state:
+    st.session_state.last_debug = ""
+st.markdown("#### 🔍 Debug info (for development)")
+st.markdown(st.session_state.last_debug or "_Ingen data endnu._")
+
+for i, opt in enumerate(opts):
+    if cols[i % 5].button(opt["display"], key=f"tile_{i}"):
+        # prepare and log input
+        user_display = opt["display"]
+        user_meaning = opt["meaning"]
+        st.session_state.last_debug = f"Klik registreret: display='{user_display}', meaning='{user_meaning}'"
+        st.session_state.messages.append({"role": "user", "content": user_display})
+        try:
+            with st.spinner(f"Tænker over: {user_meaning}"):
+                resp = requests.post(
+                    OLLAMA_URL,
+                    json={
+                        "model": MODEL_NAME,
+                        "prompt": f"Bruger siger (semantisk): {user_meaning}",
+                        "stream": False,
+                    },
+                    timeout=180,
+                )
+                raw = resp.text
+                st.session_state.last_debug += f"<br><br><b>Raw model output:</b><br><pre>{raw[:400]}</pre>"
+                try:
+                    parsed = json.loads(raw.splitlines()[-1])
+                    reply_json = json.loads(parsed.get("response", "{}"))
+                except Exception as e:
+                    reply_json = {"assistant_reply": f"Fejl i parsing: {e}"}
+                    st.session_state.last_debug += f"<br><b>Parse error:</b> {e}"
+        except Exception as e:
+            reply_json = {"assistant_reply": f"Fejl i API-kald: {e}"}
+            st.session_state.last_debug += f"<br><b>API error:</b> {e}"
+
+        # show reply and update state
+        st.session_state.messages.append({"role": "assistant", "content": reply_json.get("assistant_reply", "")})
+        st.session_state.text_opts = reply_json.get("text_suggestions", [])
+        st.session_state.emoji_opts = reply_json.get("emoji_suggestions", [])
+        threading.Thread(target=speak, args=(reply_json.get("assistant_reply", ""),), daemon=True).start()
         st.rerun()
 
-# ---------------------------
-# TEXT INPUT FALLBACK
-# ---------------------------
+    # hover div (for TTS)
+    hover_id = f"hover_{i}"
+    st.markdown(
+        f'<div id="{hover_id}" onmouseover="startHoverTimer(\'{opt["meaning"]}\')" onmouseout="cancelHoverTimer()"></div>',
+        unsafe_allow_html=True,
+    )
+
+# Manual text input
 user_text = st.text_input("Skriv selv:", key="manual_input")
 if user_text:
     st.session_state.messages.append({"role": "user", "content": user_text})
+    with st.spinner("Tænker..."):
+        reply = query_model(user_text)
+    st.session_state.messages.append({"role": "assistant", "content": reply.get("assistant_reply", "")})
+    st.session_state.text_opts = reply.get("text_suggestions", [])
+    st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
+    threading.Thread(target=speak, args=(reply.get("assistant_reply", ""),), daemon=True).start()
     st.rerun()
 
-# ---------------------------
-# HOVER-TO-SPEAK JavaScript (10 s)
-# ---------------------------
+# Hover-to-speak JS
 st.markdown(
     """
 <script>
-let hoverTimers = {};
-function startHoverTimer(text, id){
-  cancelHoverTimer(id);
-  hoverTimers[id] = setTimeout(() => {
-      fetch('/_tts?text=' + encodeURIComponent(text));
+let hoverTimer = null;
+function startHoverTimer(text){
+  cancelHoverTimer();
+  hoverTimer = setTimeout(() => {
+     fetch('http://127.0.0.1:8765/_tts?text=' + encodeURIComponent(text));
   }, 10000);
 }
-function cancelHoverTimer(id){
-  if(hoverTimers[id]){
-      clearTimeout(hoverTimers[id]);
-      delete hoverTimers[id];
-  }
+function cancelHoverTimer(){
+  if(hoverTimer){ clearTimeout(hoverTimer); hoverTimer = null; }
 }
 </script>
-""",
-    unsafe_allow_html=True,
+    """,
+    unsafe_allow_html=True
 )

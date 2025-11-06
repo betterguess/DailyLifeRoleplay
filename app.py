@@ -18,6 +18,20 @@ HOVER_TTS_PORT = 8765
 
 st.set_page_config(page_title="Aphasia Trainer", layout="wide")
 
+from openai import AzureOpenAI
+from dotenv import load_dotenv
+
+load_dotenv()  # Automatically loads environment variables from .env
+
+# --- Build the client once ---
+_client = AzureOpenAI(
+    api_version=os.getenv("AZURE_API_VERSION", "2024-12-01-preview"),
+    azure_endpoint=os.getenv("AZURE_ENDPOINT"),
+    api_key=os.getenv("AZURE_API_KEY"),
+)
+_DEPLOYMENT = os.getenv("AZURE_DEPLOYMENT", "gpt-5-chat")
+
+
 # TTS
 def speak(text: str):
     try:
@@ -84,57 +98,46 @@ def query_model(user_input: str):
         Krav:
         - Kun gyldig JSON som svar. Ingen forklaringer eller tekst uden for JSON.
         - `assistant_reply` er din tale til brugeren, max 1–2 korte sætninger.
-        - `text_suggestions` (maks 10) er naturlige danske svarmuligheder.
-        - `emoji_suggestions` (maks 10) matcher semantisk i samme rækkefølge som text_suggestions (hvis relevant).
+        - `text_suggestions` 3–8 korte danske muligheder.
+        - `emoji_suggestions` samme længde og rækkefølge som text_suggestions (1:1 match).
+        - Hvis en tekstmulighed ikke har en naturlig emoji, brug "🗨️".
         - Hold en støttende, tydelig, rolig tone.
     """
 
-    full_prompt = f"{system_prompt}\n\nBruger: {user_input}\nSvar:"
+
     try:
-        resp = requests.post(
-            OLLAMA_URL,
-            json={"model": MODEL_NAME, "prompt": full_prompt, "stream": False},
-            timeout=180,
+        completion = _client.chat.completions.create(
+            model=_DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_input},
+            ],
+            temperature=0.2,
+            max_tokens=400,
+            response_format={"type": "json_object"},  # ensures JSON
         )
-        text = resp.text
 
-        # --- find first/last braces in any messy string
-        start = text.find("{")
-        end = text.rfind("}")
-        parsed_json = {}
-        if start != -1 and end != -1:
-            try:
-                candidate = text[start:end + 1]
-                parsed_json = json.loads(candidate)
-            except Exception as e:
-                st.error(f"⚠️ JSON parse failed: {e}")
-                st.code(candidate[:500])
-                parsed_json = {}
-        else:
-            st.error("⚠️ No JSON object found in response.")
-            st.code(text[:500])
+        raw = completion.choices[0].message.content
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            st.warning("⚠️ Model output was not valid JSON – showing raw text.")
+            data = {"assistant_reply": raw, "text_suggestions": [], "emoji_suggestions": []}
 
-        # fallback or extract nested
-        if "response" in parsed_json and isinstance(parsed_json["response"], str):
-            try:
-                parsed_json = json.loads(parsed_json["response"])
-            except Exception as e:
-                st.error(f"⚠️ Nested JSON parse failed: {e}")
-                st.code(parsed_json["response"][:500])
-                parsed_json = {}
+        data.setdefault("assistant_reply", "")
+        data.setdefault("text_suggestions", [])
+        data.setdefault("emoji_suggestions", [])
 
-        parsed_json.setdefault("assistant_reply", "Beklager, jeg kunne ikke forstå svaret.")
-        parsed_json.setdefault("text_suggestions", [])
-        parsed_json.setdefault("emoji_suggestions", [])
-        return parsed_json
+        # Optional: quick debug in sidebar
+        with st.sidebar:
+            st.markdown("#### 🧩 Model debug")
+            st.code(f"{data['assistant_reply'][:120]}…")
+
+        return data
 
     except Exception as e:
         st.error(f"Model error: {e}")
-        return {
-            "assistant_reply": "Beklager, der opstod en fejl.",
-            "text_suggestions": [],
-            "emoji_suggestions": [],
-        }
+        return {"assistant_reply": "Der opstod en fejl.", "text_suggestions": [], "emoji_suggestions": []}
 
 # Session state
 if "messages" not in st.session_state:

@@ -64,6 +64,22 @@ Krav:
 - Hold en støttende, tydelig, rolig tone.
     """
 
+import glob
+
+SCENARIO_DIR = "scenarios"
+
+def load_scenarios():
+    scenarios = []
+    for f in glob.glob(f"{SCENARIO_DIR}/*.json"):
+        with open(f, "r", encoding="utf-8") as infile:
+            try:
+                data = json.load(infile)
+                scenarios.append(data)
+            except Exception as e:
+                st.warning(f"Kunne ikke indlæse {f}: {e}")
+    return sorted(scenarios, key=lambda s: s["title"])
+
+SCENARIOS = load_scenarios()
 
 # ============================================================
 #  TTS MICROSERVER
@@ -128,8 +144,13 @@ client = AzureOpenAI(
 def query_model(user_input: str):
     """Send full chat history to Azure GPT-5 and return structured JSON."""
     try:
-        # Build full message context
-        history = [{"role": "system", "content": SYSTEM_PROMPT}]
+        scenario_extra = ""
+        if "scenario_index" in st.session_state and SCENARIOS:
+            scenario_extra = SCENARIOS[st.session_state.scenario_index].get("system_prompt_addition", "")
+        system_prompt = SYSTEM_PROMPT + "\n\n" + scenario_extra
+
+        # Build full history
+        history = [{"role": "system", "content": system_prompt}]
         for m in st.session_state.messages:
             history.append({"role": m["role"], "content": m["content"]})
         history.append({"role": "user", "content": user_input})
@@ -141,7 +162,7 @@ def query_model(user_input: str):
             max_tokens=400,
             response_format={"type": "json_object"},
         )
-
+        
         raw = completion.choices[0].message.content
         try:
             data = json.loads(raw)
@@ -195,6 +216,21 @@ for key, default in {
 # ============================================================
 
 with st.sidebar:
+    st.markdown("### 🏪 Scenario")
+    if SCENARIOS:
+        titles = [s["title"] for s in SCENARIOS]
+        selected_title = st.selectbox(
+            "Vælg en situation:",
+            titles,
+            index=0 if "scenario_index" not in st.session_state else st.session_state.scenario_index,
+        )
+        st.session_state.scenario_index = titles.index(selected_title)
+        current_scenario = SCENARIOS[st.session_state.scenario_index]
+        st.markdown(f"🗒️ {current_scenario['description']}")
+    else:
+        st.warning("Ingen scenarier fundet i ./scenarios/")
+        current_scenario = None
+
     st.header("🎛️ Indstillinger")
     new_listen = st.toggle("🎙 Taleinput (WebSocket)", value=st.session_state.listening)
     if new_listen != st.session_state.listening:

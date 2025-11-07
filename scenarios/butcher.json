@@ -1,0 +1,7 @@
+{
+  "id": "butcher",
+  "title": "Hos slagteren",
+  "description": "Brugeren øver at bestille kød og smalltalk med slagteren.",
+  "system_prompt_addition": "Forestil dig at samtalen foregår i en slagterbutik. Brug ord som 'oksekød', 'pølse', 'kotelet'.",
+  "first_message": "Du træder ind i slagterbutikken. Slagteren smiler og siger hej. Hvad siger du?"
+}

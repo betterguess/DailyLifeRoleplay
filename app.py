@@ -362,7 +362,8 @@ st.markdown("### Vælg et svar:")
 def build_options():
     opts = []
     if st.session_state.input_mode == "Text":
-        opts = [{"display": t, "meaning": t, "meta": None} for t in (st.session_state.text_opts or [])]
+        opts = [{"display": t, "meaning": t, "meta": None}
+                for t in (st.session_state.text_opts or [])]
     else:
         emj = st.session_state.emoji_opts or []
         txt = st.session_state.text_opts or []
@@ -370,37 +371,57 @@ def build_options():
             meaning = txt[i] if i < len(txt) else e
             opts.append({"display": e, "meaning": meaning, "meta": None})
         if not opts and txt:
-            opts = [{"display": "🗨️", "meaning": t, "meta": None} for t in txt[:5]]
+            opts = [{"display": "🗨️", "meaning": t, "meta": None}
+                    for t in txt[:5]]
         if not opts:
             opts = [{"display": "🤝", "meaning": "Hej", "meta": None}]
-
-    # prepend universal options
-    all_opts = UNIVERSAL_CHOICES + opts
-    return all_opts[:10]
+    return opts
 
 
-opts = build_options()
-cols = st.columns(min(5, len(opts)) or 1)
+# ==== META BUTTON ROW ====
+st.markdown("### Hurtige svar")
+with st.container():
+    st.markdown('<div class="meta-scope">', unsafe_allow_html=True)
+    meta_cols = st.columns(len(UNIVERSAL_CHOICES))
+    for i, opt in enumerate(UNIVERSAL_CHOICES):
+        with meta_cols[i]:
+            if st.button(opt["display"], key=f"meta_{i}", use_container_width=True):
+                text_to_send = f"<meta:{opt['meta']}> {opt['meaning']}"
+                st.session_state.messages.append({"role": "user", "content": text_to_send})
+                with st.spinner("Tænker..."):
+                    reply = query_model(text_to_send)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": reply.get("assistant_reply", "")})
+                st.session_state.text_opts = reply.get("text_suggestions", [])
+                st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
+                threading.Thread(target=speak,
+                                 args=(reply.get("assistant_reply",""),),
+                                 daemon=True).start()
+                st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-for i, opt in enumerate(opts):
-    if cols[i % 5].button(opt["display"], key=f"tile_{i}"):
-        text_to_send = opt["meaning"]
-        if opt.get("meta"):
-            text_to_send = f"<meta:{opt['meta']}> {opt['meaning']}"
-        st.session_state.messages.append({"role": "user", "content": text_to_send})
-        with st.spinner("Tænker..."):
-            reply = query_model(text_to_send)
-        st.session_state.messages.append(
-            {"role": "assistant", "content": reply.get("assistant_reply", "")}
-        )
-        st.session_state.text_opts = reply.get("text_suggestions", [])
-        st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
-        threading.Thread(
-            target=speak,
-            args=(reply.get("assistant_reply", ""),),
-            daemon=True,
-        ).start()
-        st.rerun()
+# ==== NORMAL OPTIONS ROW ====
+st.markdown("### Mulige svar")
+with st.container():
+    st.markdown('<div class="opts-scope">', unsafe_allow_html=True)
+    opts = build_options()
+    num_cols = min(5, len(opts)) or 1
+    cols = st.columns(num_cols)
+    for i, opt in enumerate(opts):
+        with cols[i % num_cols]:
+            if st.button(opt["display"], key=f"opt_{i}", use_container_width=True):
+                st.session_state.messages.append({"role": "user", "content": opt["meaning"]})
+                with st.spinner("Tænker..."):
+                    reply = query_model(opt["meaning"])
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": reply.get("assistant_reply","")})
+                st.session_state.text_opts = reply.get("text_suggestions", [])
+                st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
+                threading.Thread(target=speak,
+                                 args=(reply.get("assistant_reply",""),),
+                                 daemon=True).start()
+                st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
     hover_id = f"hover_{i}"
     st.markdown(
@@ -467,3 +488,70 @@ function cancelHoverTimer(){{
 """,
     unsafe_allow_html=True,
 )
+
+# CSS for buttons
+
+st.markdown("""
+<style>
+/* Center column contents */
+div[data-testid="column"] {
+    display: flex;
+    justify-content: center;
+}
+
+/* ========== META BUTTONS ========== */
+.meta-scope div.stButton > button,
+.meta-scope div.stButton > button * {
+    width: 200px !important;
+    height: 220px !important;
+    margin: 8px !important;
+    border-radius: 20px !important;
+    background-color: #e5f1ff !important;
+    border: 3px solid #5b9bff !important;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.15) !important;
+
+    /* Safari fix */
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+    -webkit-text-size-adjust: none !important;
+
+    font-size: 110px !important;
+    line-height: 1 !important;
+    text-align: center !important;
+    padding: 0 !important;
+    font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji",
+                 system-ui, sans-serif !important;
+}
+
+/* ========== NORMAL BUTTONS ========== */
+.opts-scope div.stButton > button,
+.opts-scope div.stButton > button * {
+    width: 200px !important;
+    height: 140px !important;
+    margin: 8px !important;
+    border-radius: 16px !important;
+    background-color: #f9f9f9 !important;
+    border: 2px solid #ccc !important;
+    box-shadow: 0 2px 3px rgba(0,0,0,0.1) !important;
+
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+    -webkit-text-size-adjust: none !important;
+
+    font-size: 36px !important;
+    line-height: 1.1 !important;
+    padding: 4px 8px !important;
+}
+
+/* Hover feedback */
+.meta-scope div.stButton > button:hover {
+    background-color: #d6e8ff !important;
+    transform: scale(1.04);
+}
+.opts-scope div.stButton > button:hover {
+    background-color: #f0f0f0 !important;
+}
+</style>
+""", unsafe_allow_html=True)

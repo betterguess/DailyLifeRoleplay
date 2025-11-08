@@ -7,7 +7,6 @@ import streamlit as st
 from openai import AzureOpenAI
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from dotenv import load_dotenv
 import pyttsx3
 import websockets
 
@@ -15,14 +14,13 @@ import websockets
 #  ENV + GLOBAL CONFIG
 # ============================================================
 
-load_dotenv()
 
-AZURE_API_KEY = os.getenv("AZURE_API_KEY")
-AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
-AZURE_DEPLOYMENT = os.getenv("AZURE_DEPLOYMENT", "gpt-5-chat")
-AZURE_API_VERSION = os.getenv("AZURE_API_VERSION", "2024-12-01-preview")
+AZURE_API_KEY = st.secrets["AZURE_API_KEY"]
+AZURE_ENDPOINT = st.secrets["AZURE_ENDPOINT"]
+AZURE_DEPLOYMENT = st.secrets["AZURE_DEPLOYMENT"]
+AZURE_API_VERSION = st.secrets["AZURE_API_VERSION"]
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_URL = st.secrets["OLLAMA_URL"]
 TRANSCRIBER_WS = "ws://localhost:9000/transcribe"
 HOVER_TTS_PORT = 8765
 

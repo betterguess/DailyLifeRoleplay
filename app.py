@@ -162,7 +162,7 @@ def query_model(user_input: str):
             max_tokens=400,
             response_format={"type": "json_object"},
         )
-        
+
         raw = completion.choices[0].message.content
         try:
             data = json.loads(raw)
@@ -310,7 +310,11 @@ if st.session_state.listening:
 
 if not st.session_state.messages:
     with st.spinner("Starter samtalen..."):
-        reply = query_model("<session_start>")
+        if current_scenario and current_scenario.get("first_message"):
+            first = current_scenario["first_message"]
+            reply = query_model(first)
+        else:
+            reply = query_model("<session_start>")
     st.session_state.messages.append(
         {"role": "assistant", "content": reply.get("assistant_reply", "")}
     )

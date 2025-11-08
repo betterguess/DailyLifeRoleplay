@@ -29,6 +29,17 @@ HOVER_TTS_PORT = 8765
 st.set_page_config(page_title="Aphasia Conversation Trainer", layout="wide")
 
 # ============================================================
+#  UNIVERSAL CHOICES
+# ============================================================
+
+UNIVERSAL_CHOICES = [
+    {"display": "🆘", "meaning": "Hjælp", "meta": "HELP"},
+    {"display": "😕", "meaning": "Forstår ikke", "meta": "CONFUSED"},
+    {"display": "👍", "meaning": "Ja", "meta": "YES"},
+    {"display": "👎", "meaning": "Nej", "meta": "NO"}
+]
+
+# ============================================================
 #  SYSTEM PROMPT
 # ============================================================
 
@@ -37,6 +48,9 @@ Du er en venlig dansk sprogtræner, der hjælper personer med afasi med at øve 
 i at købe ind hos slagteren. Du skal spille rollen som en venlig slagter der hjælper kunden.
 
 Hvis samtalen ikke fungerer for brugeren kan du bryde ud af rollen og i stedet være en sprogterapeut der prøvet at hjælpe brugeren.
+
+Du skal starte så simplet som muligt, men må gerne udforde mere både med spørgsmål og svarmuligheder hvis du vurderer at brugeren
+klarer sig godt nok til at blive udfordret mere.
 
 Du må gerne kommunikere med emoji og andre billeder, hvis det virker som om det er nødvendigt. Samtalen slutter når kunden har opnået 
 deres mål som er at købe ind til et måltid ELLER har opgivet opgaven
@@ -47,6 +61,13 @@ Svar altid på dansk.
 
 Når du modtager strengen \"<session_start>\", skal du begynde samtalen med en venlig dansk hilsen og foreslå 3–5 helt enkle svarmuligheder.
 
+Hvis brugeren siger eller klikker på noget af det følgende, skal du reagere som en sprogtræner
+i stedet for at fortsætte scenariet:
+
+- "Hjælp" eller meta:HELP → Forklar kort, hvad brugeren kan sige, eller giv et forslag.
+- "Forstår ikke" eller meta:CONFUSED → Forklar langsomt, gentag sidste sætning enklere. Hvis du ser den flere gange eller vurderer at brugeren er i affekt så bryd ud af rollespillet og vurder om der skal fortsættes.
+- "Ja" eller meta:YES → Bekræft venligt, evt. med et simpelt opfølgende spørgsmål.
+- "Nej" eller meta:NO → Anerkend svaret og tilbyd et alternativ.
 
 Returnér ALTID gyldig JSON med denne struktur:
 {
@@ -54,6 +75,10 @@ Returnér ALTID gyldig JSON med denne struktur:
 "text_suggestions": ["mulighed 1", "mulighed 2", "..."],
 "emoji_suggestions": ["emoji1", "emoji2", "..."]
 }
+
+Når samtalen er slut, uanset hvordan, så giv en vurdering af, hvordan det gik, og hviklet niveau af udfordringer brugeren er klar til som næste øvelse.
+
+Hvis du har historik på brugeren så tag den i betragtning, og kom med et nyt bud på aktuel status.
 
 Krav:
 - Kun gyldig JSON som svar. Ingen forklaringer eller tekst uden for JSON.
@@ -337,18 +362,21 @@ st.markdown("### Vælg et svar:")
 def build_options():
     opts = []
     if st.session_state.input_mode == "Text":
-        opts = [{"display": t, "meaning": t} for t in (st.session_state.text_opts or [])]
+        opts = [{"display": t, "meaning": t, "meta": None} for t in (st.session_state.text_opts or [])]
     else:
         emj = st.session_state.emoji_opts or []
         txt = st.session_state.text_opts or []
         for i, e in enumerate(emj):
             meaning = txt[i] if i < len(txt) else e
-            opts.append({"display": e, "meaning": meaning})
+            opts.append({"display": e, "meaning": meaning, "meta": None})
         if not opts and txt:
-            opts = [{"display": "🗨️", "meaning": t} for t in txt[:5]]
+            opts = [{"display": "🗨️", "meaning": t, "meta": None} for t in txt[:5]]
         if not opts:
-            opts = [{"display": "🤝", "meaning": "Hej"}]
-    return opts[:10]
+            opts = [{"display": "🤝", "meaning": "Hej", "meta": None}]
+
+    # prepend universal options
+    all_opts = UNIVERSAL_CHOICES + opts
+    return all_opts[:10]
 
 
 opts = build_options()
@@ -356,9 +384,12 @@ cols = st.columns(min(5, len(opts)) or 1)
 
 for i, opt in enumerate(opts):
     if cols[i % 5].button(opt["display"], key=f"tile_{i}"):
-        st.session_state.messages.append({"role": "user", "content": opt["display"]})
+        text_to_send = opt["meaning"]
+        if opt.get("meta"):
+            text_to_send = f"<meta:{opt['meta']}> {opt['meaning']}"
+        st.session_state.messages.append({"role": "user", "content": text_to_send})
         with st.spinner("Tænker..."):
-            reply = query_model(opt["meaning"])
+            reply = query_model(text_to_send)
         st.session_state.messages.append(
             {"role": "assistant", "content": reply.get("assistant_reply", "")}
         )

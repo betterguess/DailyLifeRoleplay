@@ -1,0 +1,7 @@
+{
+  "id": "train_ticket",
+  "title": "Køb togbillet",
+  "description": "Brugeren øver at købe en togbillet og stille spørgsmål om afgangstid og pris.",
+  "system_prompt_addition": "Forestil dig at samtalen foregår ved billetskranken på en togstation. Brug ord som 'billet', 'afgang', 'enkelt', 'retur', 'perron', 'ankomst', 'pris'.",
+  "first_message": "Du står ved billetskranken. Ekspedienten siger: 'Hej, hvor vil du gerne rejse hen i dag?'"
+}

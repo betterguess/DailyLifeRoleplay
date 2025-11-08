@@ -1,0 +1,7 @@
+{
+  "id": "haircut",
+  "title": "Hos frisøren",
+  "description": "Brugeren øver at bestille en klipning og småsnakke med frisøren.",
+  "system_prompt_addition": "Forestil dig at samtalen foregår i en frisørsalon. Brug ord som 'klipning', 'shampoo', 'kort hår', 'maskine', 'vask'. Stil rolige spørgsmål som 'Hvordan vil du klippes?' eller 'Vil du have noget i håret bagefter?'.",
+  "first_message": "Du sætter dig i frisørstolen. Frisøren smiler og spørger: 'Hej, hvordan vil du gerne klippes i dag?'"
+}

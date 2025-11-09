@@ -13,11 +13,26 @@ import websockets
 #  ENV + GLOBAL CONFIG
 # ============================================================
 
+import os
 
-AZURE_API_KEY = st.secrets["AZURE_API_KEY"]
-AZURE_ENDPOINT = st.secrets["AZURE_ENDPOINT"]
-AZURE_DEPLOYMENT = st.secrets["AZURE_DEPLOYMENT"]
-AZURE_API_VERSION = st.secrets["AZURE_API_VERSION"]
+def get_secret(name: str, default=None):
+    """
+    Retrieve a secret value, preferring environment variables (Azure, Docker)
+    but falling back to Streamlit secrets for local dev and Streamlit Cloud.
+    """
+    if name in os.environ:
+        return os.environ[name]
+    if name in st.secrets:
+        return st.secrets[name]
+    if default is not None:
+        return default
+    raise KeyError(f"Missing required secret: {name}")
+
+
+AZURE_API_KEY = get_secret("AZURE_API_KEY")
+AZURE_ENDPOINT = get_secret("AZURE_ENDPOINT")
+AZURE_DEPLOYMENT = get_secret("AZURE_DEPLOYMENT")
+AZURE_API_VERSION = get_secret("AZURE_API_VERSION")
 
 TRANSCRIBER_WS = "ws://localhost:9000/transcribe"
 HOVER_TTS_PORT = 8765
@@ -136,8 +151,8 @@ try:
     def speak(text: str):
         text = strip_emojis(text)
         speech_config = speechsdk.SpeechConfig(
-            subscription=st.secrets["AZURE_SPEECH_KEY"],
-            region=st.secrets["AZURE_SPEECH_REGION"],
+            subscription=get_secret("AZURE_SPEECH_KEY"),
+            region=get_secret("AZURE_SPEECH_REGION"),
         )
         # speech_config.speech_synthesis_voice_name = "en-US-JennyNeural"  # choose your voice
         speech_config.speech_synthesis_voice_name = "da-DK-JeppeNeural"  # choose your voice

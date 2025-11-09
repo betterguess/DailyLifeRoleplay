@@ -24,6 +24,9 @@ HOVER_TTS_PORT = 8765
 
 st.set_page_config(page_title="Aphasia Conversation Trainer", layout="wide")
 
+import os
+import streamlit as st
+
 # ============================================================
 #  UNIVERSAL CHOICES
 # ============================================================
@@ -136,8 +139,9 @@ try:
             subscription=st.secrets["AZURE_SPEECH_KEY"],
             region=st.secrets["AZURE_SPEECH_REGION"],
         )
-        speech_config.speech_synthesis_voice_name = "en-US-JennyNeural"  # choose your voice
-        audio_config = speechsdk.audio.AudioOutputConfig(use_default_speaker=False)
+        # speech_config.speech_synthesis_voice_name = "en-US-JennyNeural"  # choose your voice
+        speech_config.speech_synthesis_voice_name = "da-DK-JeppeNeural"  # choose your voice
+        audio_config = speechsdk.audio.AudioOutputConfig(use_default_speaker=True)
 
         synthesizer = speechsdk.SpeechSynthesizer(
             speech_config=speech_config, audio_config=audio_config

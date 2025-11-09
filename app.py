@@ -7,7 +7,6 @@ import streamlit as st
 from openai import AzureOpenAI
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import pyttsx3
 import websockets
 
 # ============================================================
@@ -108,13 +107,61 @@ SCENARIOS = load_scenarios()
 #  TTS MICROSERVER
 # ============================================================
 
-def speak(text: str):
+import os
+import streamlit as st
+
+import re
+
+def strip_emojis(text: str) -> str:
+    # Match and remove all emoji and pictographs
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F680-\U0001F6FF"  # transport & map symbols
+        "\U0001F1E0-\U0001F1FF"  # flags
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "]+",
+        flags=re.UNICODE
+    )
+    return emoji_pattern.sub("", text)
+
+# Try Azure TTS first
+try:
+    import azure.cognitiveservices.speech as speechsdk
+
+    def speak(text: str):
+        text = strip_emojis(text)
+        speech_config = speechsdk.SpeechConfig(
+            subscription=st.secrets["AZURE_SPEECH_KEY"],
+            region=st.secrets["AZURE_SPEECH_REGION"],
+        )
+        speech_config.speech_synthesis_voice_name = "en-US-JennyNeural"  # choose your voice
+        audio_config = speechsdk.audio.AudioOutputConfig(use_default_speaker=False)
+
+        synthesizer = speechsdk.SpeechSynthesizer(
+            speech_config=speech_config, audio_config=audio_config
+        )
+        result = synthesizer.speak_text_async(text).get()
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+            st.audio(result.audio_data, format="audio/wav")
+        else:
+            st.error(f"TTS failed: {result.reason}")
+
+except Exception as e:
+    # Fallback to pyttsx3 locally
     try:
+        import pyttsx3
         engine = pyttsx3.init()
-        engine.say(text)
-        engine.runAndWait()
-    except Exception as e:
-        print("TTS error:", e)
+
+        def speak(text: str):
+            engine.say(text)
+            engine.runAndWait()
+
+    except ImportError:
+        def speak(text: str):
+            st.warning("TTS not available on this environment.")
 
 
 class _TTSHandler(BaseHTTPRequestHandler):

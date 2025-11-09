@@ -1,6 +1,11 @@
 # Mac stuff
 .DS_Store
-.streamlit/*
+
+# Streamlit secrets (local only)
+.streamlit/secrets.toml
+
+# Streamlit temporary files (optional)
+.streamlit/.*/cache/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

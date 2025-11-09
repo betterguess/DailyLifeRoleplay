@@ -31,7 +31,7 @@ colorlog>=6.8
 
 # Specific to this app
 openai==1.51.0
-azure-cognitiveservices-speech
+websockets
 
 # ---- Local-only / ML-heavy packages (excluded for Cloud) ----
 # torch>=2.5.1

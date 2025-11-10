@@ -296,9 +296,13 @@ client = AzureOpenAI(
 def query_model(user_input: str):
     """Send full chat history to Azure GPT-5 and return structured JSON."""
     try:
+        # Prefer ad-hoc custom scenario if enabled; otherwise use selected predefined
         scenario_extra = ""
-        if "scenario_index" in st.session_state and SCENARIOS:
+        if st.session_state.get("use_custom_scenario") and st.session_state.get("custom_scenario"):
+            scenario_extra = st.session_state.custom_scenario.get("system_prompt_addition", "")
+        elif "scenario_index" in st.session_state and SCENARIOS:
             scenario_extra = SCENARIOS[st.session_state.scenario_index].get("system_prompt_addition", "")
+            
         system_prompt = SYSTEM_PROMPT + "\n\n" + scenario_extra
 
         # Build full history
@@ -359,6 +363,11 @@ for key, default in {
     "input_mode": "Text",
     "listening": False,
     "sent_this_turn": False,
+    # New: scenario management
+    "scenario_index": 0,               # currently selected predefined scenario
+    "last_scenario_index": None,       # to detect changes and reset chat
+    "use_custom_scenario": False,      # flag to use ad-hoc scenario instead of predefined
+    "custom_scenario": {},             # holds {"title","description","system_prompt_addition"}
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -367,22 +376,106 @@ for key, default in {
 #  SIDEBAR
 # ============================================================
 
-with st.sidebar:
-    st.markdown("### 🏪 Scenario")
-    if SCENARIOS:
-        titles = [s["title"] for s in SCENARIOS]
-        selected_title = st.selectbox(
-            "Vælg en situation:",
-            titles,
-            index=0 if "scenario_index" not in st.session_state else st.session_state.scenario_index,
-        )
-        st.session_state.scenario_index = titles.index(selected_title)
-        current_scenario = SCENARIOS[st.session_state.scenario_index]
-        st.markdown(f"🗒️ {current_scenario['description']}")
-    else:
-        st.warning("Ingen scenarier fundet i ./scenarios/")
-        current_scenario = None
+# ============================================================
+#  SIDEBAR
+# ============================================================
 
+with st.sidebar:
+    st.markdown("### ⚙️ Tilstand")
+    mode = st.radio(
+        "Vælg type af scenarie",
+        ["Foruddefineret", "Eget (ad-hoc)"],
+        index=1 if st.session_state.get("use_custom_scenario") else 0,
+    )
+
+    # Sync session state with mode choice
+    st.session_state.use_custom_scenario = mode == "Eget (ad-hoc)"
+
+    st.markdown("### 🏪 Scenario")
+
+    # --- Handle predefined scenarios ---
+    if not st.session_state.use_custom_scenario:
+        if SCENARIOS:
+            titles = [s["title"] for s in SCENARIOS]
+            selected_title = st.selectbox(
+                "Vælg en situation:",
+                titles,
+                index=0 if "scenario_index" not in st.session_state else st.session_state.scenario_index,
+            )
+            new_index = titles.index(selected_title)
+
+            # Detect scenario change and reset
+            if (
+                st.session_state.last_scenario_index is None
+                or new_index != st.session_state.last_scenario_index
+            ):
+                st.session_state.scenario_index = new_index
+                st.session_state.last_scenario_index = new_index
+                for k in ["messages", "text_opts", "emoji_opts", "sent_this_turn"]:
+                    st.session_state[k] = [] if isinstance(st.session_state[k], list) else False
+                st.session_state.use_custom_scenario = False
+                st.rerun()
+
+            st.session_state.scenario_index = new_index
+            current_scenario = SCENARIOS[new_index]
+            st.markdown(f"🗒️ {current_scenario['description']}")
+        else:
+            st.warning("Ingen scenarier fundet i ./scenarios/")
+            current_scenario = None
+
+    # --- Handle custom scenario mode ---
+    else:
+        current_scenario = st.session_state.custom_scenario or {}
+        st.success(f"Bruger ad-hoc scenarie: **{current_scenario.get('title','(uden titel)')}**")
+
+    # --- Custom scenario builder ---
+    st.markdown("---")
+    st.markdown("### 🧪 Prøv dit eget scenarie")
+    with st.form("custom_scenario_form", clear_on_submit=False):
+        c_title = st.text_input(
+            "Titel",
+            value=st.session_state.custom_scenario.get("title", "Mit ad-hoc scenarie"),
+        )
+        c_desc = st.text_area(
+            "Beskrivelse",
+            value=st.session_state.custom_scenario.get("description", "Ad-hoc scenarie uden fil."),
+        )
+        c_spa = st.text_area(
+            "System prompt-tilføjelse (system_prompt_addition)",
+            value=st.session_state.custom_scenario.get("system_prompt_addition", ""),
+            help="Tilføjes nederst i den faste systemprompt.",
+        )
+        c_first = st.text_area(
+            "Første besked (first_message)",
+            value=st.session_state.custom_scenario.get("first_message", ""),
+            help="Valgfrit — bruges som åbningsreplik fra assistenten.",
+        )
+        try_it = st.form_submit_button("▶️ Prøv det")
+
+    if try_it:
+        # Store custom scenario fully
+        st.session_state.custom_scenario = {
+            "title": c_title.strip() or "Mit ad-hoc scenarie",
+            "description": c_desc.strip(),
+            "system_prompt_addition": c_spa.strip(),
+            "first_message": c_first.strip(),
+        }
+        st.session_state.use_custom_scenario = True
+
+        # Reset conversation state completely
+        for k in ["messages", "text_opts", "emoji_opts", "sent_this_turn"]:
+            st.session_state[k] = [] if isinstance(st.session_state[k], list) else False
+
+        # Disable predefined scenario indexing (force switch)
+        st.session_state.last_scenario_index = None
+
+        # Immediately activate the new scenario for this run
+        current_scenario = st.session_state.custom_scenario
+
+        # Restart the Streamlit app cleanly
+        st.rerun()
+
+    # --- Settings ---
     st.header("🎛️ Indstillinger")
     new_listen = st.toggle("🎙 Taleinput (WebSocket)", value=st.session_state.listening)
     if new_listen != st.session_state.listening:
@@ -390,7 +483,8 @@ with st.sidebar:
         st.rerun()
 
     new_mode = st.radio(
-        "Input-tilstand", ["Text", "Pictures (emoji)"],
+        "Input-tilstand",
+        ["Text", "Pictures (emoji)"],
         index=0 if st.session_state.input_mode == "Text" else 1,
     )
     if new_mode != st.session_state.input_mode:
@@ -408,6 +502,12 @@ with st.sidebar:
 # ============================================================
 
 st.title("🗣️ Aphasia Conversation Trainer")
+
+# Optional: show which scenario is in use
+if st.session_state.get("use_custom_scenario") and st.session_state.get("custom_scenario"):
+    st.caption(f"Ad-hoc scenarie: **{st.session_state.custom_scenario.get('title','(uden titel)')}**")
+elif SCENARIOS:
+    st.caption(f"Scenarie: **{SCENARIOS[st.session_state.scenario_index]['title']}**")
 
 for msg in st.session_state.messages:
     avatar = "🧩" if msg["role"] == "assistant" else "👤"

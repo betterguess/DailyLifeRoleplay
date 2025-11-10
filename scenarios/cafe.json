@@ -1,7 +1,7 @@
 {
-  "id": "haircut",
-  "title": "Hos frisøren",
-  "description": "Brugeren øver at bestille en klipning og småsnakke med frisøren.",
-  "system_prompt_addition": "Forestil dig at samtalen foregår i en frisørsalon. Brug ord som 'klipning', 'shampoo', 'kort hår', 'maskine', 'vask'. Stil rolige spørgsmål som 'Hvordan vil du klippes?' eller 'Vil du have noget i håret bagefter?'.",
-  "first_message": "Du sætter dig i frisørstolen. Frisøren smiler og spørger: 'Hej, hvordan vil du gerne klippes i dag?'"
+  "id": "cafe",
+  "title": "På café",
+  "description": "Brugeren øver at bestille kaffe, kage eller en snack og hilse på personalet.",
+  "system_prompt_addition": "Forestil dig at samtalen foregår på en café. Brug ord som 'kaffe', 'kage', 'croissant', 'cappuccino', 'latte', 'regning'. Hold tonen venlig og uformel.",
+  "first_message": "Du træder ind på caféen. En tjener spørger smilende: 'Hej! Hvad kunne du tænke dig i dag?'"
 }

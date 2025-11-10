@@ -8,6 +8,7 @@ from openai import AzureOpenAI
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import websockets
+import streamlit.components.v1 as components
 
 # ============================================================
 #  ENV + GLOBAL CONFIG
@@ -106,6 +107,65 @@ def azure_diagnostics():
 if st.sidebar.button("Run Azure Diagnostics"):
     azure_diagnostics()
     
+# ============================================================
+#  LOCAL TTS SERVER (listens on :8502/_tts?text=...)
+# ============================================================
+import threading, os, socket
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+
+
+_TTS_PORT = None  # will be set once
+
+class _TTSHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):  # silence
+        return
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path != "/_tts":
+            self.send_response(404); self.end_headers(); return
+        query = parse_qs(parsed.query)
+        text = query.get("text", [""])[0]
+        if text:
+            print("🔊 Speaking:", text)
+                # Use macOS TTS
+            threading.Thread(target=speak, args=(text,), daemon=True).start()
+        body = b"OK"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+def start_tts_server():
+    global _TTS_PORT
+    if _TTS_PORT is not None:
+        return _TTS_PORT  # already running
+
+    # try ports 8502-8510 until one works
+    for port in range(8502, 8511):
+        try:
+            s = socket.socket()
+            s.bind(("127.0.0.1", port))
+            s.close()
+            _TTS_PORT = port
+            def _run():
+                try:
+                    server = HTTPServer(("127.0.0.1", port), _TTSHandler)
+                    print(f"✅ TTS server running at http://localhost:{port}/_tts?text=...")
+                    server.serve_forever()
+                except Exception as e:
+                    print("TTS server error:", e)
+            threading.Thread(target=_run, daemon=True).start()
+            return _TTS_PORT
+        except OSError:
+            continue
+
+    print("❌ No free port for TTS server.")
+    return None
+
+_TTS_PORT = start_tts_server()
 
 # ============================================================
 #  UNIVERSAL CHOICES
@@ -380,27 +440,35 @@ for key, default in {
 #  SIDEBAR
 # ============================================================
 
+# ============================================================
+#  SIDEBAR
+# ============================================================
+
 with st.sidebar:
-    st.markdown("### ⚙️ Tilstand")
+    st.markdown("### ⚙️ Scenarietilstand")
     mode = st.radio(
         "Vælg type af scenarie",
         ["Foruddefineret", "Eget (ad-hoc)"],
         index=1 if st.session_state.get("use_custom_scenario") else 0,
     )
 
-    # Sync session state with mode choice
+    # Sync session state
     st.session_state.use_custom_scenario = mode == "Eget (ad-hoc)"
 
-    st.markdown("### 🏪 Scenario")
-
-    # --- Handle predefined scenarios ---
+    # ------------------------------------------------------------
+    # PREDEFINED SCENARIO MODE
+    # ------------------------------------------------------------
     if not st.session_state.use_custom_scenario:
+        st.markdown("### 🏪 Foruddefineret scenarie")
+
         if SCENARIOS:
             titles = [s["title"] for s in SCENARIOS]
             selected_title = st.selectbox(
                 "Vælg en situation:",
                 titles,
-                index=0 if "scenario_index" not in st.session_state else st.session_state.scenario_index,
+                index=0
+                if "scenario_index" not in st.session_state
+                else st.session_state.scenario_index,
             )
             new_index = titles.index(selected_title)
 
@@ -412,70 +480,87 @@ with st.sidebar:
                 st.session_state.scenario_index = new_index
                 st.session_state.last_scenario_index = new_index
                 for k in ["messages", "text_opts", "emoji_opts", "sent_this_turn"]:
-                    st.session_state[k] = [] if isinstance(st.session_state[k], list) else False
+                    st.session_state[k] = (
+                        [] if isinstance(st.session_state[k], list) else False
+                    )
                 st.session_state.use_custom_scenario = False
                 st.rerun()
 
-            st.session_state.scenario_index = new_index
             current_scenario = SCENARIOS[new_index]
-            st.markdown(f"🗒️ {current_scenario['description']}")
+
+            # Visual info box
+            st.markdown(
+                f"🗒️ **{current_scenario['title']}**  \n"
+                f"{current_scenario.get('description','(ingen beskrivelse)')}"
+            )
         else:
             st.warning("Ingen scenarier fundet i ./scenarios/")
             current_scenario = None
 
-    # --- Handle custom scenario mode ---
+    # ------------------------------------------------------------
+    # CUSTOM (AD-HOC) MODE
+    # ------------------------------------------------------------
     else:
+        st.markdown("### 🧪 Eget scenarie")
+
         current_scenario = st.session_state.custom_scenario or {}
-        st.success(f"Bruger ad-hoc scenarie: **{current_scenario.get('title','(uden titel)')}**")
 
-    # --- Custom scenario builder ---
-    st.markdown("---")
-    st.markdown("### 🧪 Prøv dit eget scenarie")
-    with st.form("custom_scenario_form", clear_on_submit=False):
-        c_title = st.text_input(
-            "Titel",
-            value=st.session_state.custom_scenario.get("title", "Mit ad-hoc scenarie"),
-        )
-        c_desc = st.text_area(
-            "Beskrivelse",
-            value=st.session_state.custom_scenario.get("description", "Ad-hoc scenarie uden fil."),
-        )
-        c_spa = st.text_area(
-            "System prompt-tilføjelse (system_prompt_addition)",
-            value=st.session_state.custom_scenario.get("system_prompt_addition", ""),
-            help="Tilføjes nederst i den faste systemprompt.",
-        )
-        c_first = st.text_area(
-            "Første besked (first_message)",
-            value=st.session_state.custom_scenario.get("first_message", ""),
-            help="Valgfrit — bruges som åbningsreplik fra assistenten.",
-        )
-        try_it = st.form_submit_button("▶️ Prøv det")
+        # Compact info box if already defined
+        if current_scenario.get("title") or current_scenario.get("description"):
+            st.info(
+                f"**Aktivt ad-hoc scenarie:**  \n"
+                f"🧩 **{current_scenario.get('title','(uden titel)')}**  \n"
+                f"{current_scenario.get('description','')}"
+            )
 
-    if try_it:
-        # Store custom scenario fully
-        st.session_state.custom_scenario = {
-            "title": c_title.strip() or "Mit ad-hoc scenarie",
-            "description": c_desc.strip(),
-            "system_prompt_addition": c_spa.strip(),
-            "first_message": c_first.strip(),
-        }
-        st.session_state.use_custom_scenario = True
+        # --- Input form for custom scenario definition ---
+        with st.form("custom_scenario_form", clear_on_submit=False):
+            c_title = st.text_input(
+                "Titel",
+                value=current_scenario.get("title", "Mit ad-hoc scenarie"),
+            )
+            c_desc = st.text_area(
+                "Beskrivelse",
+                value=current_scenario.get("description", "Ad-hoc scenarie uden fil."),
+            )
+            c_spa = st.text_area(
+                "System prompt-tilføjelse (system_prompt_addition)",
+                value=current_scenario.get("system_prompt_addition", ""),
+                help="Tilføjes nederst i den faste systemprompt.",
+            )
+            c_first = st.text_area(
+                "Første besked (first_message)",
+                value=current_scenario.get("first_message", ""),
+                help="Valgfrit — bruges som åbningsreplik fra assistenten.",
+            )
+            try_it = st.form_submit_button("▶️ Prøv det")
 
-        # Reset conversation state completely
-        for k in ["messages", "text_opts", "emoji_opts", "sent_this_turn"]:
-            st.session_state[k] = [] if isinstance(st.session_state[k], list) else False
+        if try_it:
+            # Store custom scenario fully
+            st.session_state.custom_scenario = {
+                "title": c_title.strip() or "Mit ad-hoc scenarie",
+                "description": c_desc.strip(),
+                "system_prompt_addition": c_spa.strip(),
+                "first_message": c_first.strip(),
+            }
+            st.session_state.use_custom_scenario = True
 
-        # Disable predefined scenario indexing (force switch)
-        st.session_state.last_scenario_index = None
+            # Reset conversation state
+            for k in ["messages", "text_opts", "emoji_opts", "sent_this_turn"]:
+                st.session_state[k] = (
+                    [] if isinstance(st.session_state[k], list) else False
+                )
 
-        # Immediately activate the new scenario for this run
-        current_scenario = st.session_state.custom_scenario
+            # Disable predefined tracking
+            st.session_state.last_scenario_index = None
 
-        # Restart the Streamlit app cleanly
-        st.rerun()
+            # Activate immediately
+            current_scenario = st.session_state.custom_scenario
+            st.rerun()
 
-    # --- Settings ---
+    # ------------------------------------------------------------
+    # UNIVERSAL SETTINGS
+    # ------------------------------------------------------------
     st.header("🎛️ Indstillinger")
     new_listen = st.toggle("🎙 Taleinput (WebSocket)", value=st.session_state.listening)
     if new_listen != st.session_state.listening:
@@ -650,12 +735,112 @@ with st.container():
                 st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-    hover_id = f"hover_{i}"
-    st.markdown(
-        f'<div id="{hover_id}" onmouseover="startHoverTimer(\'{opt["meaning"]}\')" onmouseout="cancelHoverTimer()"></div>',
-        unsafe_allow_html=True,
-    )
+# ============================================================
+#  HOVER / TOUCH-HOLD → SPEAK (5s)
+#  (insert after the meta + opts button rows are rendered)
+# ============================================================
+import json
+import streamlit.components.v1 as components
 
+# Use the exact texts you want spoken
+meta_speak_texts = [opt["display"] for opt in UNIVERSAL_CHOICES]  # "Hurtige svar"
+opts_speak_texts = [o["meaning"] for o in opts]                   # "Mulige svar" (or o["display"])
+
+_script = """
+<script>
+(function() {
+  const SPEAK_DELAY = 3000; // ms
+  let timer = null;
+  let activeElem = null;
+  let lastSpoken = "";
+
+  if (!window.parent.__ttsHoverInstalled) {
+    window.parent.__ttsHoverInstalled = true;
+
+    const parentDoc = window.parent.document;
+
+    function cancelTimer() {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      if (activeElem) {
+        try { activeElem.style.outline = ""; } catch (e) {}
+        activeElem = null;
+      }
+    }
+
+    function startTimer(elem) {
+      cancelTimer();
+      activeElem = elem;
+      timer = setTimeout(() => {
+        const text = elem.dataset.tts || elem.innerText || elem.textContent || "";
+        if (text && text !== lastSpoken) {
+          lastSpoken = text;
+          try {
+            elem.style.outline = "2px solid orange";    // visual confirmation
+            setTimeout(() => { elem.style.outline = ""; }, 900);
+          } catch (e) {}
+          fetch("http://localhost:__TTS_PORT__/_tts?text=" + encodeURIComponent(text)).catch(() => {});
+        }
+      }, SPEAK_DELAY);
+    }
+
+    // Global listeners on the parent document
+    parentDoc.addEventListener("mouseover", (e) => {
+      const btn = e.target.closest("button");
+      if (btn && btn.textContent.trim() !== "") startTimer(btn);
+    });
+    parentDoc.addEventListener("mouseout", (e) => {
+      if (e.target.closest("button")) cancelTimer();
+    });
+    parentDoc.addEventListener("touchstart", (e) => {
+      const btn = e.target.closest("button");
+      if (btn && btn.textContent.trim() !== "") startTimer(btn);
+    }, {passive: true});
+    parentDoc.addEventListener("touchend", () => cancelTimer(), {passive: true});
+
+    // Re-apply mappings on DOM changes
+    const observer = new MutationObserver(() => {
+      if (window.parent.__applyTtsMappings) window.parent.__applyTtsMappings();
+    });
+    observer.observe(parentDoc.body, { childList: true, subtree: true });
+  }
+
+  // Map the correct text to each button within each scope
+  window.parent.__applyTtsMappings = function() {
+    const d = window.parent.document;
+
+    const metaScope = d.querySelector(".meta-scope");
+    if (metaScope) {
+      const metaBtns = metaScope.querySelectorAll("button");
+      const metaTexts = __META__;
+      metaBtns.forEach((b, i) => {
+        if (metaTexts[i]) b.dataset.tts = metaTexts[i];
+      });
+    }
+
+    const optsScope = d.querySelector(".opts-scope");
+    if (optsScope) {
+      const optBtns = optsScope.querySelectorAll("button");
+      const optTexts = __OPTS__;
+      optBtns.forEach((b, i) => {
+        if (optTexts[i]) b.dataset.tts = optTexts[i];
+      });
+    }
+  };
+
+  // Apply now
+  window.parent.__applyTtsMappings();
+})();
+</script>
+"""
+
+_script = _script.replace("__META__", json.dumps(meta_speak_texts)) \
+                 .replace("__OPTS__", json.dumps(opts_speak_texts))
+
+components.html(
+    _script.replace("__TTS_PORT__", str(_TTS_PORT or 8502)),
+    height=0,
+)
 # ============================================================
 #  MANUAL TEXT INPUT (FINAL, CLEAN + NO WARNINGS)
 # ============================================================

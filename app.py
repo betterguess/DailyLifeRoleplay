@@ -697,8 +697,14 @@ with st.container():
     meta_cols = st.columns(len(UNIVERSAL_CHOICES))
     for i, opt in enumerate(UNIVERSAL_CHOICES):
         with meta_cols[i]:
+            # Store alt text for the hover/hold speech system
+            st.markdown(
+                f'<span style="display:none" id="meta_tts_{i}" data-tts="{opt["meaning"]}"></span>',
+                unsafe_allow_html=True,
+            )
             if st.button(opt["display"], key=f"meta_{i}", use_container_width=True):
                 text_to_send = f"<meta:{opt['meta']}> {opt['meaning']}"
+                st.markdown('</div>', unsafe_allow_html=True)
                 st.session_state.messages.append({"role": "user", "content": text_to_send})
                 with st.spinner("Tænker..."):
                     reply = query_model(text_to_send)
@@ -742,103 +748,111 @@ with st.container():
 import json
 import streamlit.components.v1 as components
 
-# Use the exact texts you want spoken
-meta_speak_texts = [opt["display"] for opt in UNIVERSAL_CHOICES]  # "Hurtige svar"
-opts_speak_texts = [o["meaning"] for o in opts]                   # "Mulige svar" (or o["display"])
+import json, streamlit.components.v1 as components
+
+# meta: speak the human text (meaning); fall back to emoji if ever missing
+meta_speak_texts = [opt.get("meaning") or opt.get("display", "") for opt in UNIVERSAL_CHOICES]
+
+# normal options: you likely want to speak the *meaning*; change to ["display"] if preferred
+opts_speak_texts = [o.get("meaning") or o.get("display","") for o in opts]
 
 _script = """
 <script>
-(function() {
-  const SPEAK_DELAY = 3000; // ms
-  let timer = null;
-  let activeElem = null;
-  let lastSpoken = "";
+(function () {
+  const SPEAK_DELAY = 2000;
+  let timer = null, activeElem = null, lastSpoken = "";
 
-  if (!window.parent.__ttsHoverInstalled) {
-    window.parent.__ttsHoverInstalled = true;
+  // pick parent doc if available (Streamlit component iframe)
+  const d = (window.parent && window.parent.document) ? window.parent.document : document;
 
-    const parentDoc = window.parent.document;
-
-    function cancelTimer() {
-      if (timer) clearTimeout(timer);
-      timer = null;
-      if (activeElem) {
-        try { activeElem.style.outline = ""; } catch (e) {}
-        activeElem = null;
-      }
-    }
-
-    function startTimer(elem) {
-      cancelTimer();
-      activeElem = elem;
-      timer = setTimeout(() => {
-        const text = elem.dataset.tts || elem.innerText || elem.textContent || "";
-        if (text && text !== lastSpoken) {
-          lastSpoken = text;
-          try {
-            elem.style.outline = "2px solid orange";    // visual confirmation
-            setTimeout(() => { elem.style.outline = ""; }, 900);
-          } catch (e) {}
-          fetch("http://localhost:__TTS_PORT__/_tts?text=" + encodeURIComponent(text)).catch(() => {});
-        }
-      }, SPEAK_DELAY);
-    }
-
-    // Global listeners on the parent document
-    parentDoc.addEventListener("mouseover", (e) => {
-      const btn = e.target.closest("button");
-      if (btn && btn.textContent.trim() !== "") startTimer(btn);
-    });
-    parentDoc.addEventListener("mouseout", (e) => {
-      if (e.target.closest("button")) cancelTimer();
-    });
-    parentDoc.addEventListener("touchstart", (e) => {
-      const btn = e.target.closest("button");
-      if (btn && btn.textContent.trim() !== "") startTimer(btn);
-    }, {passive: true});
-    parentDoc.addEventListener("touchend", () => cancelTimer(), {passive: true});
-
-    // Re-apply mappings on DOM changes
-    const observer = new MutationObserver(() => {
-      if (window.parent.__applyTtsMappings) window.parent.__applyTtsMappings();
-    });
-    observer.observe(parentDoc.body, { childList: true, subtree: true });
+  function cancelTimer() {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    if (activeElem) { try { activeElem.style.outline = ""; } catch(e){} activeElem = null; }
   }
 
-  // Map the correct text to each button within each scope
-  window.parent.__applyTtsMappings = function() {
+  function startTimer(elem) {
+    cancelTimer();
+    activeElem = elem;
+    timer = setTimeout(() => {
+      const text = elem.dataset.tts || elem.innerText || elem.textContent || "";
+      if (text && text !== lastSpoken) {
+        lastSpoken = text;
+        console.log("🔊 Speaking:", text);
+        try { elem.style.outline = "2px solid orange"; setTimeout(()=>{elem.style.outline="";}, 900); } catch(e){}
+        fetch("http://localhost:__TTS_PORT__/_tts?text=" + encodeURIComponent(text)).catch(()=>{});
+      }
+    }, SPEAK_DELAY);
+  }
+
+  // Install listeners once per page
+  if (!window.parent.__ttsHoverInstalled) {
+    window.parent.__ttsHoverInstalled = true;
+    d.addEventListener("mouseover", (e) => {
+      const btn = e.target.closest("button");
+      if (btn && btn.textContent.trim() !== "") startTimer(btn);
+    });
+    d.addEventListener("mouseout", (e) => {
+      if (e.target.closest("button")) cancelTimer();
+    });
+    d.addEventListener("touchstart", (e) => {
+      const btn = e.target.closest("button");
+      if (btn && btn.textContent.trim() !== "") startTimer(btn);
+    }, {passive:true});
+    d.addEventListener("touchend", () => cancelTimer(), {passive:true});
+  }
+
+  // Mapping: ALWAYS set data-tts from arrays (overrides emoji-only labels)
+  const metaTexts = __META__;
+  const optTexts  = __OPTS__;
+
+function applyMappings() {
+  try {
+    // look for any element that contains one of the known emoji labels
     const d = window.parent.document;
+    const allButtons = d.querySelectorAll("button, [role=button]");
+    const metaTexts = __META__;
+    const optTexts  = __OPTS__;
 
-    const metaScope = d.querySelector(".meta-scope");
-    if (metaScope) {
-      const metaBtns = metaScope.querySelectorAll("button");
-      const metaTexts = __META__;
-      metaBtns.forEach((b, i) => {
-        if (metaTexts[i]) b.dataset.tts = metaTexts[i];
-      });
-    }
+    let metaIndex = 0;
+    let optIndex  = 0;
 
-    const optsScope = d.querySelector(".opts-scope");
-    if (optsScope) {
-      const optBtns = optsScope.querySelectorAll("button");
-      const optTexts = __OPTS__;
-      optBtns.forEach((b, i) => {
-        if (optTexts[i]) b.dataset.tts = optTexts[i];
-      });
-    }
-  };
+    allButtons.forEach((b) => {
+      const label = (b.innerText || b.textContent || "").trim();
 
-  // Apply now
-  window.parent.__applyTtsMappings();
+      // Match meta buttons by emoji — these are the UNIVERSAL_CHOICES displays
+      if (["🆘","😕","👍","👎"].includes(label)) {
+        if (metaTexts[metaIndex]) {
+          b.dataset.tts = metaTexts[metaIndex];
+          console.log("→ mapped meta", label, "→", metaTexts[metaIndex]);
+        }
+        metaIndex++;
+      } else {
+        // everything else is a normal option button
+        if (optTexts[optIndex]) {
+          b.dataset.tts = optTexts[optIndex];
+        }
+        optIndex++;
+      }
+    });
+
+    console.log(`✅ TTS mapping applied to ${metaIndex} meta + ${optIndex} normal buttons`);
+  } catch (e) {
+    console.warn("TTS mapping error (retrying):", e);
+    setTimeout(applyMappings, 400);
+  }
+}
+
+  applyMappings();
 })();
 </script>
 """
 
-_script = _script.replace("__META__", json.dumps(meta_speak_texts)) \
-                 .replace("__OPTS__", json.dumps(opts_speak_texts))
-
+# Use the actual TTS port you started earlier (_TTS_PORT from your resilient server code)
 components.html(
-    _script.replace("__TTS_PORT__", str(_TTS_PORT or 8502)),
+    _script.replace("__META__", json.dumps(meta_speak_texts))
+           .replace("__OPTS__", json.dumps(opts_speak_texts))
+           .replace("__TTS_PORT__", str(_TTS_PORT)),
     height=0,
 )
 # ============================================================

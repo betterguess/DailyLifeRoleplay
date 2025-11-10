@@ -1,0 +1,13 @@
+{
+
+  "id": "handrehab",
+
+  "title": "Håndtræning",
+
+  "description": "Brugeren øver sin håndmotorik ved at gentage simple fingerbevægelser hos sin fysioterapeut.",
+
+  "system_prompt_addition": "Forestil dig at samtalen foregår hos en fysioterapeut. Brug ord som pegefinger, åben hånd, knyt hånd'.",
+
+  "first_message": "Du kommer hen til din fysioterapeut. Terapeuten siger Hej hvordan går det med din hånd?"
+
+}

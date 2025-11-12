@@ -121,7 +121,7 @@ UNIVERSAL_CHOICES = [
 SYSTEM_PROMPT = """
 Du er en venlig dansk sprogtræner, der hjælper personer med afasi med at øve hverdagssamtaler. 
 
-Hvis samtalen ikke fungerer for brugeren kan du bryde ud af rollen og i stedet være en sprogterapeut der prøvet at hjælpe brugeren.
+Hvis samtalen ikke fungerer for brugeren kan du bryde ud af rollen og i stedet være en sprogterapeut der prøver at hjælpe brugeren.
 
 Du skal starte så simplet som muligt, men må gerne udforde mere både med spørgsmål og svarmuligheder hvis du vurderer at brugeren
 klarer sig godt nok til at blive udfordret mere.
@@ -381,6 +381,19 @@ for key, default in {
 # ============================================================
 
 with st.sidebar:
+    # --- feedback mail link ---
+    st.markdown(
+        """
+        <a href="mailto:anderssewerin@mac.com?subject=Feedback%20p%C3%A5%20samtaletr%C3%A6ner"
+           style="display:inline-block;background:#2b7;color:#fff;
+                  padding:8px 14px;border-radius:6px;text-decoration:none;
+                  font-weight:600;margin-bottom:12px;">
+           ✉️  Send feedback
+        </a>
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.markdown("### ⚙️ Scenarietilstand")
     mode = st.radio(
         "Vælg type af scenarie",

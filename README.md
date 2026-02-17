@@ -23,6 +23,18 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### 3b. Initialize database schema with Alembic
+
+For a fresh local database:
+```bash
+alembic upgrade head
+```
+
+If `data/app.db` already exists and already has the current tables, mark it as current first:
+```bash
+alembic stamp head
+```
+
 ### 4. Start required backend services
 
 #### 🧠 Ollama (local LLM)
@@ -65,6 +77,38 @@ The app will open in your browser (default: [http://localhost:8501](http://local
 - 🔁 **Up to 10 clickable response suggestions** per turn  
 - 🔊 **Spoken replies** via kokoro-tts (placeholder: `pyttsx3`)  
 - 🧱 Built for **local operation** and full privacy  
+- 🔐 **Role-based access control** with four user types
+
+---
+
+## 👤 Users And Roles
+
+The app now supports four roles:
+
+- `patient`: local username/password login and access to conversation training
+- `therapist`: SSO/AD-style login (provisioned in app), can monitor own patients and create ad-hoc roleplays
+- `manager`: SSO/AD-style login, can view cross-team user/activity overview
+- `developer`: full access across all modules and health checks
+
+### Hybrid authentication model
+
+- Patients are created as **local users** (stored in `data/app.db` with salted PBKDF2 hashes).
+- Employees use **SSO/Active Directory style provisioning** (email + role, restricted by optional domain policy).
+
+### Environment options for employee login
+
+- `STAFF_EMAIL_DOMAIN`: if set, employee email must match this domain
+- `STAFF_ROLE_OVERRIDES_JSON`: optional JSON map from email to fixed role  
+  Example: `{"alice@hospital.dk":"manager","bob@hospital.dk":"therapist"}`
+
+### First startup account
+
+If there are no users yet, the app bootstraps:
+
+- username: `devadmin`
+- password: `changeme123`
+
+Change or replace this account immediately in non-test environments.
 
 ---
 
@@ -119,6 +163,27 @@ DailyLifeRoleplay/
 - 🔈 Integrate **kokoro-tts** playback via API
 - 🧩 Add **custom Modelfile** for aphasia-friendly prompting
 - 🧠 Optional: persist user progress or scenario tracking
+
+---
+
+## 🗃️ Database migrations (Alembic)
+
+The project now includes Alembic config in `alembic.ini` and migration scripts under `alembic/versions/`.
+
+Create a new migration after model changes:
+```bash
+alembic revision --autogenerate -m "describe change"
+```
+
+Apply migrations:
+```bash
+alembic upgrade head
+```
+
+Rollback one migration:
+```bash
+alembic downgrade -1
+```
 
 ---
 

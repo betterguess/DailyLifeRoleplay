@@ -8,6 +8,24 @@ import streamlit as st
 import streamlit.components.v1 as components
 import websockets
 
+from src.auth import (
+    ROLE_DEVELOPER,
+    ROLE_MANAGER,
+    ROLE_PATIENT,
+    ROLE_THERAPIST,
+    User,
+    authenticate_local_user,
+    create_local_user,
+    get_activity_counts,
+    get_patients_for_therapist,
+    get_therapists,
+    has_permission,
+    init_auth_store,
+    list_users,
+    log_event,
+    provision_sso_user,
+    sso_domain_allowed,
+)
 from src.config import load_azure_settings
 from src.model import create_client, query_model as query_model_core
 from src.scenarios import load_scenarios
@@ -18,6 +36,7 @@ TRANSCRIBER_WS = "ws://localhost:9000/transcribe"
 HOVER_TTS_PORT = 8765
 
 st.set_page_config(page_title="Aphasia Conversation Trainer", layout="wide")
+init_auth_store()
 
 # Runtime services
 speak = build_speak()
@@ -105,12 +124,14 @@ def query_model(user_input: str):
             messages=st.session_state.messages,
         )
 
-        with st.sidebar:
-            st.markdown("#### 🧩 Model debug")
-            st.code(
-                f"{data['assistant_reply'][:120]}…\n"
-                f"text_opts: {len(data['text_suggestions'])}, emoji_opts: {len(data['emoji_suggestions'])}"
-            )
+        user = _current_user()
+        if user and user.role == ROLE_DEVELOPER:
+            with st.sidebar:
+                st.markdown("#### 🧩 Model debug")
+                st.code(
+                    f"{data['assistant_reply'][:120]}…\n"
+                    f"text_opts: {len(data['text_suggestions'])}, emoji_opts: {len(data['emoji_suggestions'])}"
+                )
 
         return data
     except Exception as exc:
@@ -178,6 +199,53 @@ def run_health_checks():
     }
 
 
+def _role_label(role: str) -> str:
+    labels = {
+        ROLE_PATIENT: "Patient",
+        ROLE_THERAPIST: "Terapeut",
+        ROLE_MANAGER: "Leder",
+        ROLE_DEVELOPER: "Udvikler",
+    }
+    return labels.get(role, role)
+
+
+def _set_logged_in_user(user: User) -> None:
+    st.session_state.current_user = {
+        "username": user.username,
+        "display_name": user.display_name,
+        "role": user.role,
+        "auth_source": user.auth_source,
+        "therapist_username": user.therapist_username,
+    }
+
+
+def _current_user() -> User | None:
+    raw = st.session_state.get("current_user")
+    if not raw:
+        return None
+    return User(
+        username=raw["username"],
+        display_name=raw["display_name"],
+        role=raw["role"],
+        auth_source=raw["auth_source"],
+        therapist_username=raw.get("therapist_username"),
+    )
+
+
+def _can(permission: str) -> bool:
+    user = _current_user()
+    if not user:
+        return False
+    return has_permission(user.role, permission)
+
+
+def _log_activity(event_type: str, payload: dict | None = None) -> None:
+    user = _current_user()
+    if not user:
+        return
+    log_event(user.username, event_type, payload or {})
+
+
 for key, default in {
     "messages": [],
     "text_opts": [],
@@ -190,12 +258,96 @@ for key, default in {
     "use_custom_scenario": False,
     "custom_scenario": {},
     "health_results": None,
+    "current_user": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
 
+if not _current_user():
+    st.title("🔐 Login")
+    st.write("Patienter logger ind lokalt. Ansatte bruger SSO/Active Directory (simuleret provisionering).")
+    st.info("Første opstart indeholder dev-konto: `devadmin / changeme123`.")
+
+    patient_tab, employee_tab, create_tab = st.tabs(
+        ["Patient login", "Ansat login (SSO/AD)", "Opret patient"]
+    )
+    with patient_tab:
+        with st.form("patient_login_form", clear_on_submit=False):
+            p_username = st.text_input("Brugernavn")
+            p_password = st.text_input("Kodeord", type="password")
+            p_login = st.form_submit_button("Log ind som patient")
+        if p_login:
+            user = authenticate_local_user(p_username, p_password)
+            if not user or user.role != ROLE_PATIENT:
+                st.error("Forkert login for patient.")
+            else:
+                _set_logged_in_user(user)
+                st.rerun()
+
+    with employee_tab:
+        if not sso_domain_allowed("person@example.org"):
+            st.warning("STAFF_EMAIL_DOMAIN er aktiv. Brug email fra korrekt domæne.")
+        with st.form("employee_login_form", clear_on_submit=False):
+            e_email = st.text_input("Arbejdsemail")
+            e_role = st.selectbox(
+                "Ansat-rolle",
+                [ROLE_THERAPIST, ROLE_MANAGER, ROLE_DEVELOPER],
+                format_func=_role_label,
+            )
+            e_login = st.form_submit_button("Log ind med SSO")
+        if e_login:
+            try:
+                user = provision_sso_user(e_email, e_role)
+                _set_logged_in_user(user)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Kunne ikke logge ind: {exc}")
+
+    with create_tab:
+        st.caption("Patientoprettelse til test/drift. I produktion bør dette ligge bag terapeut/udvikler-login.")
+        therapists = get_therapists()
+        therapist_usernames = [u.username for u in therapists]
+        if not therapist_usernames:
+            st.warning("Ingen terapeuter fundet endnu. Opret/log ind en terapeut via SSO-fanen først.")
+        else:
+            with st.form("create_patient_form", clear_on_submit=True):
+                new_username = st.text_input("Nyt patient-brugernavn")
+                new_name = st.text_input("Visningsnavn")
+                new_password = st.text_input("Midlertidigt kodeord", type="password")
+                therapist_username = st.selectbox("Tilknyt terapeut", therapist_usernames)
+                create_patient = st.form_submit_button("Opret patient")
+            if create_patient:
+                try:
+                    create_local_user(
+                        username=new_username,
+                        password=new_password,
+                        role=ROLE_PATIENT,
+                        display_name=new_name,
+                        therapist_username=therapist_username,
+                    )
+                    st.success("Patient oprettet.")
+                except Exception as exc:
+                    st.error(f"Kunne ikke oprette patient: {exc}")
+
+    st.stop()
+
+
+current_user = _current_user()
+
 with st.sidebar:
+    st.markdown(
+        f"**{current_user.display_name}**  \n"
+        f"Rolle: **{_role_label(current_user.role)}**  \n"
+        f"Login: `{current_user.auth_source}`"
+    )
+    if st.button("Log ud", use_container_width=True):
+        st.session_state.current_user = None
+        for key in ["messages", "text_opts", "emoji_opts", "health_results"]:
+            st.session_state[key] = [] if isinstance(st.session_state[key], list) else None
+        st.rerun()
+
+    st.markdown("---")
     st.markdown(
         """
         <a href="mailto:anderssewerin@mac.com?subject=Feedback%20p%C3%A5%20samtaletr%C3%A6ner"
@@ -209,10 +361,16 @@ with st.sidebar:
     )
 
     st.markdown("### ⚙️ Scenarietilstand")
+    scenario_modes = ["Foruddefineret"]
+    if _can("create_roleplay"):
+        scenario_modes.append("Eget (ad-hoc)")
+    if st.session_state.get("use_custom_scenario") and "Eget (ad-hoc)" not in scenario_modes:
+        st.session_state.use_custom_scenario = False
+
     mode = st.radio(
         "Vælg type af scenarie",
-        ["Foruddefineret", "Eget (ad-hoc)"],
-        index=1 if st.session_state.get("use_custom_scenario") else 0,
+        scenario_modes,
+        index=0 if not st.session_state.get("use_custom_scenario") else 1,
     )
 
     st.session_state.use_custom_scenario = mode == "Eget (ad-hoc)"
@@ -314,23 +472,82 @@ with st.sidebar:
             st.session_state[key] = []
         st.rerun()
 
-    st.markdown("---")
-    st.markdown("### 🩺 Health")
-    if st.button("Kør health check", use_container_width=True):
-        st.session_state.health_results = run_health_checks()
+    if current_user.role == ROLE_DEVELOPER:
+        st.markdown("---")
+        st.markdown("### 🩺 Health")
+        if st.button("Kør health check", use_container_width=True):
+            st.session_state.health_results = run_health_checks()
 
-    health_results = st.session_state.get("health_results")
-    if health_results:
-        for label, (ok, details) in [
-            ("OpenAI", health_results["openai"]),
-            ("Speech", health_results["speech"]),
-            ("Transcriber", health_results["transcriber"]),
-        ]:
-            icon = "✅" if ok else "❌"
-            st.write(f"{icon} {label}: {details}")
+        health_results = st.session_state.get("health_results")
+        if health_results:
+            for label, (ok, details) in [
+                ("OpenAI", health_results["openai"]),
+                ("Speech", health_results["speech"]),
+                ("Transcriber", health_results["transcriber"]),
+            ]:
+                icon = "✅" if ok else "❌"
+                st.write(f"{icon} {label}: {details}")
+
+    if current_user.role in {ROLE_THERAPIST, ROLE_MANAGER, ROLE_DEVELOPER}:
+        st.markdown("---")
+        st.markdown("### 📈 Data")
+        if current_user.role == ROLE_THERAPIST:
+            own_patients = get_patients_for_therapist(current_user.username)
+            counts = get_activity_counts([p.username for p in own_patients])
+            st.caption(f"Tilknyttede patienter: {len(own_patients)}")
+            for patient in own_patients:
+                st.write(f"- {patient.display_name} (`{patient.username}`): {counts.get(patient.username, 0)} events")
+        elif current_user.role == ROLE_MANAGER:
+            all_users = list_users()
+            therapists = [u for u in all_users if u.role == ROLE_THERAPIST]
+            patients = [u for u in all_users if u.role == ROLE_PATIENT]
+            counts = get_activity_counts([p.username for p in patients])
+            st.caption(f"Terapeuter: {len(therapists)}")
+            st.caption(f"Patienter: {len(patients)}")
+            st.caption(f"Total events: {sum(counts.values())}")
+        else:
+            all_users = list_users()
+            counts = get_activity_counts()
+            st.caption(f"Brugere i alt: {len(all_users)}")
+            st.caption(f"Events i alt: {sum(counts.values())}")
+
+    if current_user.role in {ROLE_THERAPIST, ROLE_DEVELOPER}:
+        st.markdown("---")
+        st.markdown("### 👥 Opret patient")
+        with st.form("staff_create_patient_form", clear_on_submit=True):
+            p_user = st.text_input("Patient-brugernavn")
+            p_name = st.text_input("Patient-navn")
+            p_pwd = st.text_input("Midlertidigt kodeord", type="password")
+            if current_user.role == ROLE_THERAPIST:
+                assigned_therapist = current_user.username
+                st.caption(f"Tilknyttes automatisk: `{assigned_therapist}`")
+            else:
+                therapist_options = [u.username for u in get_therapists()]
+                if therapist_options:
+                    assigned_therapist = st.selectbox("Tilknyt terapeut", therapist_options)
+                else:
+                    assigned_therapist = ""
+                    st.caption("Ingen terapeuter oprettet endnu.")
+            create_from_staff = st.form_submit_button("Opret")
+        if create_from_staff:
+            try:
+                create_local_user(
+                    username=p_user,
+                    password=p_pwd,
+                    role=ROLE_PATIENT,
+                    display_name=p_name,
+                    therapist_username=assigned_therapist,
+                )
+                st.success("Patient oprettet.")
+            except Exception as exc:
+                st.error(f"Fejl ved oprettelse: {exc}")
 
 
 st.title("🗣️ Aphasia Conversation Trainer")
+
+if not _can("use_program"):
+    st.info("Denne rolle har ikke adgang til selve træningsforløbet, men kan se data i sidepanelet.")
+    st.stop()
 
 if st.session_state.get("use_custom_scenario") and st.session_state.get("custom_scenario"):
     st.caption(f"Ad-hoc scenarie: **{st.session_state.custom_scenario.get('title', '(uden titel)')}**")
@@ -358,12 +575,14 @@ async def ws_task():
                 if "final" in payload and payload["final"]:
                     text = payload["final"]
                     st.session_state.messages.append({"role": "user", "content": text})
+                    _log_activity("user_message", {"source": "speech", "text": text})
                     with st.spinner("Tænker..."):
                         reply = query_model(text)
 
                     st.session_state.messages.append(
                         {"role": "assistant", "content": reply.get("assistant_reply", "")}
                     )
+                    _log_activity("assistant_reply", {"source": "speech"})
                     st.session_state.text_opts = reply.get("text_suggestions", [])
                     st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
                     threading.Thread(
@@ -394,6 +613,8 @@ if not st.session_state.messages:
             reply = query_model("<session_start>")
 
     st.session_state.messages.append({"role": "assistant", "content": reply.get("assistant_reply", "")})
+    _log_activity("session_start", {"scenario_mode": "custom" if st.session_state.get("use_custom_scenario") else "predefined"})
+    _log_activity("assistant_reply", {"source": "session_start"})
     st.session_state.text_opts = reply.get("text_suggestions", [])
     st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
     threading.Thread(target=speak, args=(reply.get("assistant_reply", ""),), daemon=True).start()
@@ -430,11 +651,13 @@ with st.container():
                 text_to_send = f"<meta:{opt['meta']}> {opt['meaning']}"
                 st.markdown("</div>", unsafe_allow_html=True)
                 st.session_state.messages.append({"role": "user", "content": text_to_send})
+                _log_activity("user_message", {"source": "meta_button", "meta": opt["meta"], "text": opt["meaning"]})
                 with st.spinner("Tænker..."):
                     reply = query_model(text_to_send)
                 st.session_state.messages.append(
                     {"role": "assistant", "content": reply.get("assistant_reply", "")}
                 )
+                _log_activity("assistant_reply", {"source": "meta_button"})
                 st.session_state.text_opts = reply.get("text_suggestions", [])
                 st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
                 threading.Thread(
@@ -456,11 +679,13 @@ with st.container():
         with cols[i % num_cols]:
             if st.button(opt["display"], key=f"opt_{i}", use_container_width=True):
                 st.session_state.messages.append({"role": "user", "content": opt["meaning"]})
+                _log_activity("user_message", {"source": "quick_option", "text": opt["meaning"]})
                 with st.spinner("Tænker..."):
                     reply = query_model(opt["meaning"])
                 st.session_state.messages.append(
                     {"role": "assistant", "content": reply.get("assistant_reply", "")}
                 )
+                _log_activity("assistant_reply", {"source": "quick_option"})
                 st.session_state.text_opts = reply.get("text_suggestions", [])
                 st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
                 threading.Thread(
@@ -566,11 +791,13 @@ def handle_user_input():
 
     st.session_state.sent_this_turn = True
     st.session_state.messages.append({"role": "user", "content": user_text})
+    _log_activity("user_message", {"source": "text_input", "text": user_text})
 
     with st.spinner("Tænker..."):
         reply = query_model(user_text)
 
     st.session_state.messages.append({"role": "assistant", "content": reply.get("assistant_reply", "")})
+    _log_activity("assistant_reply", {"source": "text_input"})
     st.session_state.text_opts = reply.get("text_suggestions", [])
     st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
     threading.Thread(target=speak, args=(reply.get("assistant_reply", ""),), daemon=True).start()

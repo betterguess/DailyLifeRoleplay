@@ -2,13 +2,14 @@ import asyncio
 import json
 import socket
 import threading
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import streamlit as st
 import streamlit.components.v1 as components
 import websockets
 
 from src.auth import (
+    DATABASE_URL,
     ROLE_DEVELOPER,
     ROLE_MANAGER,
     ROLE_PATIENT,
@@ -199,6 +200,46 @@ def run_health_checks():
     }
 
 
+def _database_debug_lines() -> list[str]:
+    parsed = urlparse(DATABASE_URL)
+    scheme = parsed.scheme or "ukendt"
+
+    if scheme.startswith("sqlite"):
+        db_path = DATABASE_URL.replace("sqlite:///", "", 1)
+        return [
+            "Type: `SQLite`",
+            f"Fil: `{db_path}`",
+            f"Driver: `{scheme}`",
+        ]
+
+    host = parsed.hostname or "(ukendt host)"
+    port = parsed.port or 5432
+    db_name = parsed.path.lstrip("/") or "(ukendt db)"
+    username = parsed.username or "(ukendt bruger)"
+    query = parse_qs(parsed.query)
+    sslmode = query.get("sslmode", ["ikke sat"])[0]
+
+    return [
+        "Type: `PostgreSQL`",
+        f"Host: `{host}`",
+        f"Port: `{port}`",
+        f"Database: `{db_name}`",
+        f"Bruger: `{username}`",
+        f"SSL mode: `{sslmode}`",
+        f"Driver: `{scheme}`",
+    ]
+
+
+def _database_summary_line() -> str:
+    parsed = urlparse(DATABASE_URL)
+    scheme = parsed.scheme or "ukendt"
+    if scheme.startswith("sqlite"):
+        return "DB: SQLite"
+    host = parsed.hostname or "ukendt-host"
+    db_name = parsed.path.lstrip("/") or "ukendt-db"
+    return f"DB: PostgreSQL ({host}/{db_name})"
+
+
 def _role_label(role: str) -> str:
     labels = {
         ROLE_PATIENT: "Patient",
@@ -341,6 +382,11 @@ with st.sidebar:
         f"Rolle: **{_role_label(current_user.role)}**  \n"
         f"Login: `{current_user.auth_source}`"
     )
+    st.caption(_database_summary_line())
+    with st.expander("🗄️ Database (debug)", expanded=True):
+        for line in _database_debug_lines():
+            st.markdown(line)
+
     if st.button("Log ud", use_container_width=True):
         st.session_state.current_user = None
         for key in ["messages", "text_opts", "emoji_opts", "health_results"]:

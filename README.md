@@ -35,6 +35,25 @@ If `data/app.db` already exists and already has the current tables, mark it as c
 alembic stamp head
 ```
 
+### 3c. Optional: use PostgreSQL instead of SQLite
+
+The app automatically uses PostgreSQL when host/user/password env vars are set.  
+If they are missing, it falls back to local SQLite (`data/app.db`).
+
+```bash
+export PGSQL_HOST=localhost
+export PGSQL_USER=app_user
+export PGSQL_PASS=app_password
+export PGSQL_DB=dailyliferoleplay      # optional (default: dailyliferoleplay)
+export PGSQL_PORT=5432                  # optional (default: 5432)
+export PGSQL_SSLMODE=prefer             # optional
+```
+
+Supported aliases are also accepted:
+- `PSQL_HOST`
+- `PSQL_USER` / `PSQL_User`
+- `PSQL_PASS` / `PSQL_Pass`
+
 ### 4. Start required backend services
 
 #### 🧠 Ollama (local LLM)
@@ -92,7 +111,7 @@ The app now supports four roles:
 
 ### Hybrid authentication model
 
-- Patients are created as **local users** (stored in `data/app.db` with salted PBKDF2 hashes).
+- Patients are created as **local users** (stored in the configured auth database, with salted PBKDF2 hashes).
 - Employees use **SSO/Active Directory style provisioning** (email + role, restricted by optional domain policy).
 
 ### Environment options for employee login

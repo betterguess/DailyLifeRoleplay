@@ -6,20 +6,14 @@ import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
 
-try:
-    import streamlit as st
-except Exception:  # pragma: no cover
-    st = None
+from sqlalchemy import Integer, String, Text, func, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Mapped, mapped_column
 
-from sqlalchemy import Integer, String, Text, create_engine, func, select
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from src.db import Base, get_session
 
-
-DB_PATH = Path("data/app.db")
 PBKDF2_ITERATIONS = 210_000
 
 ROLE_PATIENT = "patient"
@@ -48,10 +42,6 @@ class User:
     therapist_username: str | None
 
 
-class Base(DeclarativeBase):
-    pass
-
-
 class UserRow(Base):
     __tablename__ = "users"
 
@@ -78,73 +68,18 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _first_env(*names: str) -> str:
-    for name in names:
-        value = os.environ.get(name)
-        if value is not None and value.strip():
-            return value.strip()
-    return ""
-
-
-def _first_setting(*names: str) -> str:
-    env_value = _first_env(*names)
-    if env_value:
-        return env_value
-
-    if st is None:
-        return ""
-
-    for name in names:
-        try:
-            value = st.secrets.get(name)
-        except Exception:
-            value = None
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return ""
-
-
-def _database_url_from_env() -> str:
-    direct_url = _first_setting("DATABASE_URL", "SQLALCHEMY_DATABASE_URL")
-    if direct_url:
-        return direct_url
-
-    pg_host = _first_setting("POSTGRES_HOST", "PGHOST", "PGSQL_HOST", "PSQL_HOST")
-    pg_user = _first_setting("POSTGRES_USER", "PGUSER", "PGSQL_USER", "PSQL_USER", "PSQL_User")
-    pg_pass = _first_setting("POSTGRES_PASSWORD", "PGPASSWORD", "PGSQL_PASS", "PSQL_PASS", "PSQL_Pass")
-
-    if pg_host and pg_user and pg_pass:
-        pg_port = _first_setting("POSTGRES_PORT", "PGPORT", "PGSQL_PORT", "PSQL_PORT") or "5432"
-        pg_db = _first_setting("POSTGRES_DB", "PGDATABASE", "PGSQL_DB", "PSQL_DB") or "dailyliferoleplay"
-        pg_sslmode = _first_setting("POSTGRES_SSLMODE", "PGSSLMODE", "PGSQL_SSLMODE", "PSQL_SSLMODE")
-        query = f"?sslmode={quote_plus(pg_sslmode)}" if pg_sslmode else ""
-        return (
-            "postgresql+psycopg://"
-            f"{quote_plus(pg_user)}:{quote_plus(pg_pass)}@{pg_host}:{pg_port}/{quote_plus(pg_db)}{query}"
-        )
-
-    return f"sqlite:///{DB_PATH}"
-
-
-DATABASE_URL = _database_url_from_env()
-
-
-def _engine():
-    if DATABASE_URL.startswith("sqlite"):
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    return create_engine(DATABASE_URL, future=True)
-
-
-ENGINE = _engine()
-
-
 def init_auth_store() -> None:
-    Base.metadata.create_all(ENGINE)
-    _bootstrap_if_empty()
+    try:
+        _bootstrap_if_empty()
+    except SQLAlchemyError as exc:
+        raise RuntimeError(
+            "Databaseschema mangler eller er ikke opdateret. "
+            "Kør 'alembic upgrade head' før app-start."
+        ) from exc
 
 
 def _bootstrap_if_empty() -> None:
-    with Session(ENGINE) as session:
+    with get_session() as session:
         count = session.scalar(select(func.count()).select_from(UserRow)) or 0
         if int(count) > 0:
             return
@@ -208,7 +143,7 @@ def create_local_user(
         therapist_username=therapist_username.strip().lower() if therapist_username else None,
         created_at=_utc_now(),
     )
-    with Session(ENGINE) as session:
+    with get_session() as session:
         existing = session.get(UserRow, username)
         if existing:
             raise ValueError("Brugernavn findes allerede.")
@@ -228,7 +163,7 @@ def _to_user(row: UserRow) -> User:
 
 def authenticate_local_user(username: str, password: str) -> User | None:
     username = username.strip().lower()
-    with Session(ENGINE) as session:
+    with get_session() as session:
         row = session.get(UserRow, username)
     if row is None or row.auth_source != "local":
         return None
@@ -273,7 +208,7 @@ def provision_sso_user(email: str, requested_role: str) -> User:
     role = _role_overrides().get(email, requested_role)
     display = email.split("@", 1)[0].replace(".", " ").title()
 
-    with Session(ENGINE) as session:
+    with get_session() as session:
         row = session.get(UserRow, email)
         if row is None:
             row = UserRow(
@@ -304,7 +239,7 @@ def has_permission(role: str, permission: str) -> bool:
 
 
 def log_event(username: str, event_type: str, payload: dict[str, Any] | None = None) -> None:
-    with Session(ENGINE) as session:
+    with get_session() as session:
         session.add(
             ActivityLogRow(
                 username=username,
@@ -317,7 +252,7 @@ def log_event(username: str, event_type: str, payload: dict[str, Any] | None = N
 
 
 def list_users() -> list[User]:
-    with Session(ENGINE) as session:
+    with get_session() as session:
         rows = session.scalars(select(UserRow).order_by(UserRow.role, UserRow.username)).all()
     return [_to_user(r) for r in rows]
 
@@ -332,7 +267,7 @@ def get_therapists() -> list[User]:
 
 def get_patients_for_therapist(therapist_username: str) -> list[User]:
     therapist_username = therapist_username.strip().lower()
-    with Session(ENGINE) as session:
+    with get_session() as session:
         rows = session.scalars(
             select(UserRow)
             .where(
@@ -353,6 +288,6 @@ def get_activity_counts(usernames: list[str] | None = None) -> dict[str, int]:
     if usernames:
         stmt = stmt.where(ActivityLogRow.username.in_(usernames))
 
-    with Session(ENGINE) as session:
+    with get_session() as session:
         rows = session.execute(stmt).all()
     return {username: int(count) for username, count in rows}

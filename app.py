@@ -9,7 +9,6 @@ import streamlit.components.v1 as components
 import websockets
 
 from src.auth import (
-    DATABASE_URL,
     ROLE_DEVELOPER,
     ROLE_MANAGER,
     ROLE_PATIENT,
@@ -28,6 +27,7 @@ from src.auth import (
     sso_domain_allowed,
 )
 from src.config import load_azure_settings
+from src.db import DATABASE_URL
 from src.model import create_client, query_model as query_model_core
 from src.scenarios import load_scenarios
 from src.tts import build_speak, ensure_hover_tts_server, start_tts_server

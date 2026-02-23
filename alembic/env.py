@@ -7,7 +7,7 @@ from sqlalchemy import engine_from_config, pool
 
 from src.db import Base, DATABASE_URL
 from src.auth import ActivityLogRow, UserRow  # noqa: F401
-from src.scenarios import ScenariosRow  # noqa: F401
+from src.scenarios import ScenarioRow  # noqa: F401
 
 
 config = context.config

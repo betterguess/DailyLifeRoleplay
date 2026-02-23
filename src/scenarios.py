@@ -45,4 +45,10 @@ class ScenariosRow(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        server_default=null,
+        onupdate=func.now(),
+    
     )

@@ -1,0 +1,51 @@
+[[voice Samantha]]Welcome! Today we are learning Azure in a practical way.
+[[slnc 300]]
+[[voice Daniel]]Cool. I keep hearing Azure. Is it just cloud storage?
+[[slnc 250]]
+[[voice Samantha]]Great question. Azure is Microsoft's cloud platform. Storage is one part, but Azure also gives you virtual machines, databases, networking, security tools, AI services, and app hosting.
+[[slnc 300]]
+[[voice Daniel]]So like renting computers on the internet?
+[[slnc 250]]
+[[voice Samantha]]Exactly. Instead of buying physical servers, you rent what you need and scale up or down.
+[[slnc 300]]
+[[voice Daniel]]What are the first big things I should learn?
+[[slnc 250]]
+[[voice Samantha]]Focus on six building blocks.
+One: subscriptions and resource groups.
+Two: Azure Virtual Machines.
+Three: Azure App Service.
+Four: Azure Storage.
+Five: Azure SQL Database.
+Six: identity with Microsoft Entra ID.
+[[slnc 300]]
+[[voice Daniel]]Wait. Resource group sounds scary.
+[[slnc 250]]
+[[voice Samantha]]It is simple. A resource group is a folder for cloud resources that belong together, like your web app, database, and storage for one project.
+[[slnc 300]]
+[[voice Daniel]]How do I avoid burning money by mistake?
+[[slnc 250]]
+[[voice Samantha]]Excellent mindset. Set a budget alert on day one. Use small test sizes, turn off unused resources, and review the Cost Management page weekly.
+[[slnc 300]]
+[[voice Daniel]]What is the difference between a VM and App Service?
+[[slnc 250]]
+[[voice Samantha]]With a VM, you manage the server yourself. With App Service, Azure manages the server layer so you can focus on your code. Beginners usually ship faster with App Service.
+[[slnc 300]]
+[[voice Daniel]]How does storage work in plain language?
+[[slnc 250]]
+[[voice Samantha]]Think of Blob Storage as files in the cloud, Tables for key-value style data, Queues for messages, and Files for shared folders.
+[[slnc 300]]
+[[voice Daniel]]What should my first mini project be?
+[[slnc 250]]
+[[voice Samantha]]Build a tiny web app in App Service, save uploaded images to Blob Storage, and store user data in Azure SQL. Add monitoring with Application Insights.
+[[slnc 300]]
+[[voice Daniel]]That actually sounds doable.
+[[slnc 250]]
+[[voice Samantha]]It is. Final roadmap:
+Week one: Azure fundamentals and portal basics.
+Week two: deploy an app and connect storage.
+Week three: add database and identity.
+Week four: monitor, secure, and optimize costs.
+[[slnc 250]]
+[[voice Daniel]]Thanks. I finally understand what to learn first.
+[[slnc 250]]
+[[voice Samantha]]Perfect. Keep it project-based, and Azure will make sense quickly.

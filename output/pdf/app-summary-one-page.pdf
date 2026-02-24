@@ -1,0 +1,140 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R >> >> /Contents 7 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+7 0 obj
+<< /Length 3135 >>
+stream
+BT
+/F2 17 Tf
+1 0 0 1 44 750 Tm
+(DailyLifeRoleplay App Summary) Tj
+/F1 9 Tf
+1 0 0 1 44 738 Tm
+(Repository analyzed: /Users/magnus/Work/DailyLifeRoleplay) Tj
+/F2 11 Tf
+1 0 0 1 44 720 Tm
+(What It Is) Tj
+/F1 9 Tf
+1 0 0 1 44 708 Tm
+(A local Streamlit proof-of-concept conversation trainer for Danish aphasia practice, focused on) Tj
+/F1 9 Tf
+1 0 0 1 44 696 Tm
+(everyday roleplay scenarios. It combines chat, selectable response options, optional speech) Tj
+/F1 9 Tf
+1 0 0 1 44 684 Tm
+(input via WebSocket, and spoken output via local/Azure TTS paths.) Tj
+/F2 11 Tf
+1 0 0 1 44 666 Tm
+(Who It's For) Tj
+/F1 9 Tf
+1 0 0 1 44 654 Tm
+(Primary persona: a Danish-speaking person with aphasia practicing short, structured daily-life) Tj
+/F1 9 Tf
+1 0 0 1 44 642 Tm
+(dialogues, often with caregiver or therapist support.) Tj
+/F2 11 Tf
+1 0 0 1 44 624 Tm
+(What It Does) Tj
+/F1 9 Tf
+1 0 0 1 44 612 Tm
+(- Runs a Streamlit conversation UI with message history and assistant turns.) Tj
+/F1 9 Tf
+1 0 0 1 44 600 Tm
+(- Loads predefined scenario JSON files from scenarios/*.json.) Tj
+/F1 9 Tf
+1 0 0 1 44 588 Tm
+(- Supports ad-hoc custom scenario setup in the sidebar.) Tj
+/F1 9 Tf
+1 0 0 1 44 576 Tm
+(- Offers two input modes: text suggestions or emoji-style option buttons.) Tj
+/F1 9 Tf
+1 0 0 1 44 564 Tm
+(- Provides universal quick actions: Hjaelp, Forstaar ikke, Ja, Nej.) Tj
+/F1 9 Tf
+1 0 0 1 44 552 Tm
+(- Can listen to speech input from ws://localhost:9000/transcribe.) Tj
+/F1 9 Tf
+1 0 0 1 44 540 Tm
+(- Speaks replies via Azure Speech when configured, with pyttsx3 fallback.) Tj
+/F2 11 Tf
+1 0 0 1 44 522 Tm
+(How It Works \(Repo-Evidenced Architecture\)) Tj
+/F1 9 Tf
+1 0 0 1 44 510 Tm
+(- UI layer: app.py \(Streamlit\) manages state, options, and scenario mode.) Tj
+/F1 9 Tf
+1 0 0 1 44 498 Tm
+(- Scenario data: scenarios/*.json adds per-scenario prompt additions and first message.) Tj
+/F1 9 Tf
+1 0 0 1 44 486 Tm
+(- Model layer: AzureOpenAI chat.completions returns strict JSON with reply + suggestions.) Tj
+/F1 9 Tf
+1 0 0 1 44 474 Tm
+(- Speech-in path: WebSocket client consumes partial/final transcript events.) Tj
+/F1 9 Tf
+1 0 0 1 44 462 Tm
+(- Speech-out path: local HTTP /_tts handlers call Azure Speech SDK or pyttsx3.) Tj
+/F1 9 Tf
+1 0 0 1 44 450 Tm
+(- Not found in repo: realtime_transcriber.py implementation referenced in README.) Tj
+/F1 9 Tf
+1 0 0 1 44 438 Tm
+(- Evidence mismatch: README describes Ollama flow; app.py uses Azure OpenAI client.) Tj
+/F2 11 Tf
+1 0 0 1 44 420 Tm
+(How To Run \(Minimal Getting Started\)) Tj
+/F3 8 Tf
+1 0 0 1 44 408 Tm
+(1. cd /Users/magnus/Work/DailyLifeRoleplay) Tj
+/F3 8 Tf
+1 0 0 1 44 396 Tm
+(2. python3 -m venv .venv && source .venv/bin/activate) Tj
+/F3 8 Tf
+1 0 0 1 44 384 Tm
+(3. pip install -r requirements.txt) Tj
+/F3 8 Tf
+1 0 0 1 44 372 Tm
+(4. Set AZURE_API_KEY, AZURE_ENDPOINT, AZURE_DEPLOYMENT, AZURE_API_VERSION) Tj
+/F3 8 Tf
+1 0 0 1 44 360 Tm
+(5. Optional speech service at ws://localhost:9000/transcribe \(Not found in repo\)) Tj
+/F3 8 Tf
+1 0 0 1 44 348 Tm
+(6. python -m streamlit run app.py) Tj
+/F1 9 Tf
+1 0 0 1 44 330 Tm
+(Source basis: README.md, app.py, Dockerfile, requirements.txt, scenarios/*.json) Tj
+ET
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000261 00000 n 
+0000000331 00000 n 
+0000000406 00000 n 
+0000000474 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+3661
+%%EOF

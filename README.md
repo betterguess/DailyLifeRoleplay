@@ -91,6 +91,8 @@ http://localhost:9000/final
 {"text": "Jeg vil gerne købe noget kød."}
 ```
 
+=======
+
 #### STT runbook (drift + fejlfind)
 
 Recommended production mode:
@@ -105,6 +107,11 @@ export AZURE_SPEECH_LANGUAGE="da-DK"
 Azure startup health check (copy/paste):
 ```bash
 python3 -c 'import os,sys,socket;missing=[k for k in ("AZURE_SPEECH_KEY","AZURE_SPEECH_REGION") if not os.getenv(k)];print("Missing env:",",".join(missing) if missing else "none");h="127.0.0.1";p=9000;s=socket.socket();s.settimeout(1.5);r=s.connect_ex((h,p));s.close();print(f"Port {h}:{p} open:", r==0);sys.exit(0 if not missing else 1)'
+
+Azure startup health check:
+```bash
+make stt-check
+# or: ./scripts/stt_check.sh
 ```
 
 Quick troubleshooting:
@@ -113,6 +120,7 @@ Quick troubleshooting:
 - No transcript in app: verify transcriber is running on port `9000` and app uses `ws://localhost:9000/transcribe`
 - Low STT quality: ensure `AZURE_SPEECH_LANGUAGE=da-DK`
 
+=======
 ### 5. Launch the Streamlit interface
 ```bash
 python -m streamlit run app.py

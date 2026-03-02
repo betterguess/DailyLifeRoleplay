@@ -91,6 +91,28 @@ http://localhost:9000/final
 {"text": "Jeg vil gerne købe noget kød."}
 ```
 
+#### STT runbook (drift + fejlfind)
+
+Recommended production mode:
+```bash
+export STT_PROVIDER=azure
+export AZURE_SPEECH_KEY="..."
+export AZURE_SPEECH_REGION="westeurope"
+export AZURE_SPEECH_LANGUAGE="da-DK"
+.venv/bin/python realtime_transcriber.py --provider azure
+```
+
+Azure startup health check (copy/paste):
+```bash
+python3 -c 'import os,sys,socket;missing=[k for k in ("AZURE_SPEECH_KEY","AZURE_SPEECH_REGION") if not os.getenv(k)];print("Missing env:",",".join(missing) if missing else "none");h="127.0.0.1";p=9000;s=socket.socket();s.settimeout(1.5);r=s.connect_ex((h,p));s.close();print(f"Port {h}:{p} open:", r==0);sys.exit(0 if not missing else 1)'
+```
+
+Quick troubleshooting:
+- `Missing dependency: azure-cognitiveservices-speech`: run `.venv/bin/python -m pip install -r requirements-dev.txt`
+- `Azure provider requires credentials`: set `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION`
+- No transcript in app: verify transcriber is running on port `9000` and app uses `ws://localhost:9000/transcribe`
+- Low STT quality: ensure `AZURE_SPEECH_LANGUAGE=da-DK`
+
 ### 5. Launch the Streamlit interface
 ```bash
 python -m streamlit run app.py

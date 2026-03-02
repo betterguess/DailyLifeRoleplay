@@ -68,14 +68,25 @@ ollama pull llama3.1:8b-instruct
 Run the provided speech service (realtime partial + final transcription):
 
 ```bash
-python realtime_transcriber.py
+pip install -r requirements-dev.txt
+.venv/bin/python realtime_transcriber.py --provider auto --language da
 ```
 
-It should expose an endpoint such as:
+Azure STT mode (same websocket output, cloud transcription):
+```bash
+export AZURE_SPEECH_KEY="..."
+export AZURE_SPEECH_REGION="westeurope"
+.venv/bin/python realtime_transcriber.py --provider azure --azure-language da-DK
 ```
+
+`--provider auto` tries Azure first (when credentials are present), then falls back to local Whisper.
+
+It exposes:
+```
+ws://localhost:9000/transcribe
 http://localhost:9000/final
 ```
-that returns JSON:
+`/final` returns JSON:
 ```json
 {"text": "Jeg vil gerne købe noget kød."}
 ```

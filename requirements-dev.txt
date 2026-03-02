@@ -3,3 +3,6 @@ lightning-whisper-mlx==0.0.10
 torch>=2.5.1
 webrtcvad>=2.0.10
 onnxruntime==1.19.2
+faster-whisper>=1.1.0
+sounddevice>=0.4.7
+azure-cognitiveservices-speech>=1.41.1

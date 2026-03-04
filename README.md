@@ -72,6 +72,18 @@ pip install -r requirements-dev.txt
 .venv/bin/python realtime_transcriber.py --provider auto --language da
 ```
 
+List local microphones (for local provider testing):
+```bash
+.venv/bin/python realtime_transcriber.py --list-input-devices
+```
+
+Pin local provider to a specific microphone:
+```bash
+.venv/bin/python realtime_transcriber.py --provider local --input-device 2 --language da
+# or by name
+.venv/bin/python realtime_transcriber.py --provider local --input-device "USB Audio Device" --language da
+```
+
 Azure STT mode (same websocket output, cloud transcription):
 ```bash
 export AZURE_SPEECH_KEY="..."

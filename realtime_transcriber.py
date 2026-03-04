@@ -46,11 +46,13 @@ class RuntimeConfig:
     model_compute_type: str
     language: str
     beam_size: int
+    input_device: str
 
     # Azure provider settings
     azure_speech_key: str
     azure_speech_region: str
     azure_language: str
+    list_input_devices: bool
 
 
 def parse_args() -> RuntimeConfig:
@@ -98,6 +100,16 @@ def parse_args() -> RuntimeConfig:
     )
     parser.add_argument("--language", default="da", help="Language code for local whisper (default: da)")
     parser.add_argument("--beam-size", type=int, default=1, help="Whisper beam size")
+    parser.add_argument(
+        "--input-device",
+        default=os.getenv("STT_INPUT_DEVICE", ""),
+        help="Local input device (index or name) for sounddevice",
+    )
+    parser.add_argument(
+        "--list-input-devices",
+        action="store_true",
+        help="List available local audio input devices and exit",
+    )
 
     parser.add_argument("--azure-speech-key", default=os.getenv("AZURE_SPEECH_KEY", ""))
     parser.add_argument("--azure-speech-region", default=os.getenv("AZURE_SPEECH_REGION", ""))
@@ -123,9 +135,11 @@ def parse_args() -> RuntimeConfig:
         model_compute_type=args.model_compute_type,
         language=args.language,
         beam_size=args.beam_size,
+        input_device=args.input_device,
         azure_speech_key=args.azure_speech_key,
         azure_speech_region=args.azure_speech_region,
         azure_language=args.azure_language,
+        list_input_devices=args.list_input_devices,
     )
 
 
@@ -224,6 +238,10 @@ def capture_audio(
         ) from exc
 
     frame_samples = int(cfg.sample_rate * (cfg.frame_ms / 1000))
+    input_device: int | str | None = None
+    if cfg.input_device.strip():
+        raw = cfg.input_device.strip()
+        input_device = int(raw) if raw.isdigit() else raw
 
     def _enqueue_frame(frame: np.ndarray) -> None:
         def _push() -> None:
@@ -245,6 +263,7 @@ def capture_audio(
         channels=1,
         dtype="float32",
         blocksize=frame_samples,
+        device=input_device,
         callback=callback,
     ):
         while not stop_event.is_set():
@@ -467,11 +486,38 @@ async def process_request(path: str, _headers: object):
 async def main() -> None:
     cfg = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    if cfg.list_input_devices:
+        try:
+            import sounddevice as sd
+        except Exception as exc:
+            raise SystemExit(
+                "Missing dependency: sounddevice. Install with:\n"
+                "  .venv/bin/pip install sounddevice"
+            ) from exc
+
+        devices = sd.query_devices()
+        default_input = None
+        with contextlib.suppress(Exception):
+            default_input = sd.default.device[0]
+
+        print("Available input devices:")
+        for idx, dev in enumerate(devices):
+            if int(dev.get("max_input_channels", 0)) <= 0:
+                continue
+            marker = " (default)" if default_input == idx else ""
+            name = dev.get("name", f"device-{idx}")
+            chans = int(dev.get("max_input_channels", 0))
+            sr = int(dev.get("default_samplerate", 0))
+            print(f"  [{idx}] {name} | channels={chans} | default_sr={sr}{marker}")
+        return
+
     logging.info(
-        "Starting transcriber provider=%s on %s:%s (ws: /transcribe, http: /final)",
+        "Starting transcriber provider=%s on %s:%s (ws: /transcribe, http: /final) input_device=%s",
         cfg.provider,
         cfg.host,
         cfg.port,
+        cfg.input_device.strip() or "default",
     )
 
     queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=256)

@@ -1,7 +1,11 @@
 import asyncio
+import difflib
 import json
+import queue
+import re
 import socket
 import threading
+import time
 from urllib.parse import parse_qs, urlparse
 
 import streamlit as st
@@ -58,7 +62,8 @@ UNIVERSAL_CHOICES = [
 SYSTEM_PROMPT = """
 Du er en venlig dansk sprogtræner, der hjælper personer med afasi med at øve hverdagssamtaler.
 
-Hvis samtalen ikke fungerer for brugeren kan du bryde ud af rollen og i stedet være en sprogterapeut der prøver at hjælpe brugeren.
+Du må ikke bryde ud af rollespillet til generel chat, Q&A eller andre emner.
+Hvis brugeren spørger om noget udenfor scenariet, svar kort og før samtalen tilbage til scenariet med et enkelt, relevant spørgsmål.
 
 Du skal starte så simplet som muligt, men må gerne udforde mere både med spørgsmål og svarmuligheder hvis du vurderer at brugeren
 klarer sig godt nok til at blive udfordret mere.
@@ -76,7 +81,7 @@ Hvis brugeren siger eller klikker på noget af det følgende, skal du reagere so
 i stedet for at fortsætte scenariet:
 
 - "Hjælp" eller meta:HELP -> Forklar kort, hvad brugeren kan sige, eller giv et forslag.
-- "Forstår ikke" eller meta:CONFUSED -> Forklar langsomt, gentag sidste sætning enklere. Hvis du ser den flere gange eller vurderer at brugeren er i affekt så bryd ud af rollespillet og vurder om der skal fortsættes.
+- "Forstår ikke" eller meta:CONFUSED -> Forklar langsomt, gentag sidste sætning enklere, og bliv i samme scenarie.
 - "Ja" eller meta:YES -> Bekræft venligt, evt. med et simpelt opfølgende spørgsmål.
 - "Nej" eller meta:NO -> Anerkend svaret og tilbyd et alternativ.
 
@@ -98,6 +103,7 @@ Krav:
 - `emoji_suggestions` samme længde og rækkefølge som text_suggestions (1:1 match).
 - Hvis en tekstmulighed ikke har en naturlig emoji, brug "🗨️".
 - Hold en støttende, tydelig, rolig tone.
+- Ingen faktasvar eller sidespor udenfor scenariet; guid altid tilbage til opgaven.
 """
 
 
@@ -117,11 +123,32 @@ def query_model(user_input: str):
 
         system_prompt = SYSTEM_PROMPT + "\n\n" + scenario_extra
 
+        guided_input = user_input
+        lowered = (user_input or "").lower()
+        off_topic_markers = [
+            "hvad er",
+            "hvem er",
+            "forklar",
+            "kod",
+            "programmer",
+            "politik",
+            "nyheder",
+            "vejret",
+            "aktier",
+            "bitcoin",
+        ]
+        if any(marker in lowered for marker in off_topic_markers):
+            guided_input = (
+                "Bruger er på vej ud af rollespillet. "
+                "Svar kort og guid tilbage til aktivt scenarie.\n\n"
+                f"Brugerinput: {user_input}"
+            )
+
         data = query_model_core(
             client=client,
             deployment=settings.deployment,
             system_prompt=system_prompt,
-            user_input=user_input,
+            user_input=guided_input,
             messages=st.session_state.messages,
         )
 
@@ -287,12 +314,64 @@ def _log_activity(event_type: str, payload: dict | None = None) -> None:
     log_event(user.username, event_type, payload or {})
 
 
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", (text or "").lower())).strip()
+
+
+def _mark_tts_guard(spoken_text: str) -> None:
+    clean = (spoken_text or "").strip()
+    if not clean:
+        return
+    # Guard window sized by utterance length to reduce STT echo loops.
+    duration_s = max(1.2, min(5.0, 0.8 + (len(clean) * 0.05)))
+    st.session_state.speech_ignore_until = time.time() + duration_s
+    st.session_state.last_assistant_reply = clean
+
+
+def _looks_like_assistant_echo(transcript: str) -> bool:
+    text = (transcript or "").strip()
+    if not text:
+        return True
+
+    last_reply = st.session_state.get("last_assistant_reply", "")
+    if not last_reply:
+        return False
+
+    a = _normalize_text(text)
+    b = _normalize_text(last_reply)
+    if not a or not b:
+        return False
+
+    similarity = difflib.SequenceMatcher(None, a, b).ratio()
+    in_guard_window = time.time() < float(st.session_state.get("speech_ignore_until", 0.0))
+
+    # During guard window, only suppress if the transcript is very close to
+    # the assistant's most recent spoken reply.
+    if in_guard_window:
+        return a == b or a in b or b in a or similarity >= 0.78
+
+    # Outside the guard window we still suppress near-identical repeats.
+    return a == b or similarity >= 0.90
+
+
+def _speak_async(text: str) -> None:
+    _mark_tts_guard(text)
+    threading.Thread(target=speak, args=(text,), daemon=True).start()
+
+
 for key, default in {
     "messages": [],
     "text_opts": [],
     "emoji_opts": [],
     "input_mode": "Text",
     "listening": False,
+    "speech_partial": "",
+    "speech_error": "",
+    "speech_ws_thread": None,
+    "speech_event_queue": None,
+    "speech_stop_event": None,
+    "speech_ignore_until": 0.0,
+    "last_assistant_reply": "",
     "sent_this_turn": False,
     "scenario_index": 0,
     "last_scenario_index": None,
@@ -501,7 +580,17 @@ with st.sidebar:
     new_listen = st.toggle("🎙 Taleinput (WebSocket)", value=st.session_state.listening)
     if new_listen != st.session_state.listening:
         st.session_state.listening = new_listen
+        if not new_listen:
+            st.session_state.speech_partial = ""
+            stop_evt = st.session_state.get("speech_stop_event")
+            if stop_evt:
+                stop_evt.set()
+        else:
+            st.session_state.speech_error = ""
         st.rerun()
+
+    if st.session_state.speech_error:
+        st.caption(f"⚠️ Taleinput: {st.session_state.speech_error}")
 
     new_mode = st.radio(
         "Input-tilstand",
@@ -605,49 +694,111 @@ for message in st.session_state.messages:
     st.markdown(f"{avatar} **{message['role'].capitalize()}:** {message['content']}")
 
 
-async def ws_task():
+def _queue_speech_event(event_queue: queue.Queue, kind: str, text: str) -> None:
+    text = (text or "").strip()
+    if not text:
+        return
     try:
-        async with websockets.connect(TRANSCRIBER_WS) as ws:
-            while st.session_state.listening:
-                data = await ws.recv()
-                try:
-                    payload = json.loads(data)
-                except Exception:
-                    payload = {}
-
-                if "partial" in payload and payload["partial"]:
-                    st.write(f"🟡 Partiel: {payload['partial']}")
-
-                if "final" in payload and payload["final"]:
-                    text = payload["final"]
-                    st.session_state.messages.append({"role": "user", "content": text})
-                    _log_activity("user_message", {"source": "speech", "text": text})
-                    with st.spinner("Tænker..."):
-                        reply = query_model(text)
-
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": reply.get("assistant_reply", "")}
-                    )
-                    _log_activity("assistant_reply", {"source": "speech"})
-                    st.session_state.text_opts = reply.get("text_suggestions", [])
-                    st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
-                    threading.Thread(
-                        target=speak,
-                        args=(reply.get("assistant_reply", ""),),
-                        daemon=True,
-                    ).start()
-                    st.session_state.listening = False
-                    st.rerun()
-    except Exception:
-        pass
+        event_queue.put_nowait((kind, text))
+    except queue.Full:
+        try:
+            event_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            event_queue.put_nowait((kind, text))
+        except queue.Full:
+            pass
 
 
-def start_ws():
-    asyncio.run(ws_task())
+async def ws_task(event_queue: queue.Queue, stop_event: threading.Event):
+    while not stop_event.is_set():
+        try:
+            async with websockets.connect(TRANSCRIBER_WS) as ws:
+                _queue_speech_event(event_queue, "status", "Forbundet")
+                while not stop_event.is_set():
+                    try:
+                        data = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+
+                    try:
+                        payload = json.loads(data)
+                    except Exception:
+                        payload = {}
+
+                    _queue_speech_event(event_queue, "partial", payload.get("partial", ""))
+                    _queue_speech_event(event_queue, "final", payload.get("final", ""))
+        except Exception as exc:
+            _queue_speech_event(event_queue, "error", f"Ingen forbindelse til transcriber ({exc})")
+            await asyncio.sleep(1.0)
+
+
+def start_ws(event_queue: queue.Queue, stop_event: threading.Event):
+    asyncio.run(ws_task(event_queue, stop_event))
 
 
 if st.session_state.listening:
-    threading.Thread(target=start_ws, daemon=True).start()
+    if st.session_state.speech_event_queue is None:
+        st.session_state.speech_event_queue = queue.Queue(maxsize=256)
+    if st.session_state.speech_stop_event is None or st.session_state.speech_stop_event.is_set():
+        st.session_state.speech_stop_event = threading.Event()
+
+    current_ws_thread = st.session_state.get("speech_ws_thread")
+    if current_ws_thread is None or not current_ws_thread.is_alive():
+        ws_thread = threading.Thread(
+            target=start_ws,
+            args=(st.session_state.speech_event_queue, st.session_state.speech_stop_event),
+            daemon=True,
+        )
+        ws_thread.start()
+        st.session_state.speech_ws_thread = ws_thread
+else:
+    stop_evt = st.session_state.get("speech_stop_event")
+    if stop_evt:
+        stop_evt.set()
+
+
+speech_queue = st.session_state.get("speech_event_queue")
+if speech_queue is not None:
+    handled_final = False
+    for _ in range(32):
+        try:
+            kind, text = speech_queue.get_nowait()
+        except queue.Empty:
+            break
+
+        if kind == "error":
+            st.session_state.speech_error = text
+            continue
+        if kind == "status":
+            st.session_state.speech_error = ""
+            continue
+        if kind == "partial":
+            st.session_state.speech_partial = text
+            continue
+        if kind == "final":
+            if _looks_like_assistant_echo(text):
+                continue
+            st.session_state.speech_partial = ""
+            st.session_state.messages.append({"role": "user", "content": text})
+            _log_activity("user_message", {"source": "speech", "text": text})
+            reply = query_model(text)
+            st.session_state.messages.append(
+                {"role": "assistant", "content": reply.get("assistant_reply", "")}
+            )
+            _log_activity("assistant_reply", {"source": "speech"})
+            st.session_state.text_opts = reply.get("text_suggestions", [])
+            st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
+            _speak_async(reply.get("assistant_reply", ""))
+            handled_final = True
+            break
+
+    if handled_final:
+        st.rerun()
+
+if st.session_state.speech_partial:
+    st.caption(f"🟡 Partiel: {st.session_state.speech_partial}")
 
 
 if not st.session_state.messages:
@@ -663,7 +814,7 @@ if not st.session_state.messages:
     _log_activity("assistant_reply", {"source": "session_start"})
     st.session_state.text_opts = reply.get("text_suggestions", [])
     st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
-    threading.Thread(target=speak, args=(reply.get("assistant_reply", ""),), daemon=True).start()
+    _speak_async(reply.get("assistant_reply", ""))
     st.rerun()
 
 
@@ -706,11 +857,7 @@ with st.container():
                 _log_activity("assistant_reply", {"source": "meta_button"})
                 st.session_state.text_opts = reply.get("text_suggestions", [])
                 st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
-                threading.Thread(
-                    target=speak,
-                    args=(reply.get("assistant_reply", ""),),
-                    daemon=True,
-                ).start()
+                _speak_async(reply.get("assistant_reply", ""))
                 st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -734,11 +881,7 @@ with st.container():
                 _log_activity("assistant_reply", {"source": "quick_option"})
                 st.session_state.text_opts = reply.get("text_suggestions", [])
                 st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
-                threading.Thread(
-                    target=speak,
-                    args=(reply.get("assistant_reply", ""),),
-                    daemon=True,
-                ).start()
+                _speak_async(reply.get("assistant_reply", ""))
                 st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -846,7 +989,7 @@ def handle_user_input():
     _log_activity("assistant_reply", {"source": "text_input"})
     st.session_state.text_opts = reply.get("text_suggestions", [])
     st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
-    threading.Thread(target=speak, args=(reply.get("assistant_reply", ""),), daemon=True).start()
+    _speak_async(reply.get("assistant_reply", ""))
 
     st.session_state.manual_input = ""
     st.session_state.sent_this_turn = False
@@ -918,6 +1061,10 @@ div[data-testid="column"] {
     background-color: #f0f0f0 !important;
 }
 </style>
-""",
+    """,
     unsafe_allow_html=True,
 )
+
+if st.session_state.listening:
+    time.sleep(0.25)
+    st.rerun()

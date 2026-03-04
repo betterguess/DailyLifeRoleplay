@@ -1,6 +1,7 @@
 import re
 import socket
 import threading
+import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
@@ -44,9 +45,9 @@ def build_speak() -> Callable[[str], None]:
             )
             result = synthesizer.speak_text_async(clean_text).get()
             if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-                st.audio(result.audio_data, format="audio/wav")
+                return
             else:
-                st.error(f"TTS failed: {result.reason}")
+                logging.warning("TTS failed: %s", result.reason)
 
         return speak
     except Exception:
@@ -62,7 +63,7 @@ def build_speak() -> Callable[[str], None]:
             return speak
         except ImportError:
             def speak(text: str):
-                st.warning("TTS not available on this environment.")
+                logging.warning("TTS not available on this environment.")
 
             return speak
 

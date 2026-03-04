@@ -69,7 +69,12 @@ Run the provided speech service (realtime partial + final transcription):
 
 ```bash
 pip install -r requirements-dev.txt
-.venv/bin/python realtime_transcriber.py --provider auto --language da
+.venv/bin/python realtime_transcriber.py --provider auto --audio-source browser --language da
+```
+
+Browser microphone is streamed to:
+```
+ws://localhost:9000/ingest
 ```
 
 List local microphones (for local provider testing):
@@ -88,13 +93,14 @@ Azure STT mode (same websocket output, cloud transcription):
 ```bash
 export AZURE_SPEECH_KEY="..."
 export AZURE_SPEECH_REGION="westeurope"
-.venv/bin/python realtime_transcriber.py --provider azure --azure-language da-DK
+.venv/bin/python realtime_transcriber.py --provider azure --audio-source browser --azure-language da-DK
 ```
 
 `--provider auto` tries Azure first (when credentials are present), then falls back to local Whisper.
 
 It exposes:
 ```
+ws://localhost:9000/ingest
 ws://localhost:9000/transcribe
 http://localhost:9000/final
 ```
@@ -103,7 +109,11 @@ http://localhost:9000/final
 {"text": "Jeg vil gerne købe noget kød."}
 ```
 
-=======
+If app and transcriber run on different hosts/containers, set app websocket URL:
+```bash
+export TRANSCRIBER_WS=ws://localhost:9000/transcribe
+export TRANSCRIBER_INGEST_WS=ws://localhost:9000/ingest
+```
 
 #### STT runbook (drift + fejlfind)
 
@@ -132,7 +142,6 @@ Quick troubleshooting:
 - No transcript in app: verify transcriber is running on port `9000` and app uses `ws://localhost:9000/transcribe`
 - Low STT quality: ensure `AZURE_SPEECH_LANGUAGE=da-DK`
 
-=======
 ### 5. Launch the Streamlit interface
 ```bash
 python -m streamlit run app.py

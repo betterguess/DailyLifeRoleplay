@@ -1,6 +1,7 @@
 import asyncio
 import difflib
 import json
+import os
 import queue
 import re
 import socket
@@ -37,7 +38,11 @@ from src.scenarios import load_scenarios
 from src.tts import build_speak, ensure_hover_tts_server, start_tts_server
 
 
-TRANSCRIBER_WS = "ws://localhost:9000/transcribe"
+TRANSCRIBER_WS = os.getenv("TRANSCRIBER_WS", "ws://localhost:9000/transcribe")
+TRANSCRIBER_INGEST_WS = os.getenv(
+    "TRANSCRIBER_INGEST_WS",
+    TRANSCRIBER_WS.replace("/transcribe", "/ingest"),
+)
 HOVER_TTS_PORT = 8765
 
 st.set_page_config(page_title="Aphasia Conversation Trainer", layout="wide")
@@ -969,6 +974,152 @@ components.html(
     script.replace("__META__", json.dumps(meta_speak_texts))
     .replace("__OPTS__", json.dumps(opts_speak_texts))
     .replace("__TTS_PORT__", str(tts_port)),
+    height=0,
+)
+
+mic_script = """
+<script>
+(function () {
+  const SHOULD_LISTEN = __LISTENING__;
+  const INGEST_WS = "__INGEST_WS__";
+  const TARGET_SR = 16000;
+  const root = (window.parent && window.parent.window) ? window.parent.window : window;
+
+  function downsampleTo16k(float32Array, sourceRate) {
+    if (sourceRate === TARGET_SR) return float32Array;
+    const ratio = sourceRate / TARGET_SR;
+    const newLength = Math.round(float32Array.length / ratio);
+    const result = new Float32Array(newLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < result.length) {
+      const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+      let accum = 0;
+      let count = 0;
+      for (let i = offsetBuffer; i < nextOffsetBuffer && i < float32Array.length; i++) {
+        accum += float32Array[i];
+        count++;
+      }
+      result[offsetResult] = count > 0 ? (accum / count) : 0;
+      offsetResult++;
+      offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
+  }
+
+  function toInt16Buffer(float32Array) {
+    const pcm16 = new Int16Array(float32Array.length);
+    for (let i = 0; i < float32Array.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32Array[i]));
+      pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return pcm16.buffer;
+  }
+
+  if (!root.__dlrMic) {
+    root.__dlrMic = {
+      started: false,
+      ws: null,
+      stream: null,
+      audioCtx: null,
+      source: null,
+      processor: null,
+      connecting: false,
+    };
+  }
+
+  const state = root.__dlrMic;
+
+  function safeCloseWs() {
+    try { if (state.ws) state.ws.close(); } catch (e) {}
+    state.ws = null;
+  }
+
+  function stopMic() {
+    state.started = false;
+    try { if (state.processor) state.processor.disconnect(); } catch (e) {}
+    try { if (state.source) state.source.disconnect(); } catch (e) {}
+    try { if (state.stream) state.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    try { if (state.audioCtx) state.audioCtx.close(); } catch (e) {}
+    state.processor = null;
+    state.source = null;
+    state.stream = null;
+    state.audioCtx = null;
+    safeCloseWs();
+  }
+
+  async function startMic() {
+    if (state.started || state.connecting) return;
+    state.connecting = true;
+    try {
+      const ws = new WebSocket(INGEST_WS);
+      ws.binaryType = "arraybuffer";
+      await new Promise((resolve, reject) => {
+        ws.onopen = () => resolve();
+        ws.onerror = () => reject(new Error("ws open failed"));
+      });
+      state.ws = ws;
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      const mutedGain = audioCtx.createGain();
+      mutedGain.gain.value = 0;
+
+      processor.onaudioprocess = (event) => {
+        try {
+          if (!state.started || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+          const input = event.inputBuffer.getChannelData(0);
+          const down = downsampleTo16k(input, audioCtx.sampleRate);
+          const pcm = toInt16Buffer(down);
+          state.ws.send(pcm);
+        } catch (e) {}
+      };
+
+      source.connect(processor);
+      processor.connect(mutedGain);
+      mutedGain.connect(audioCtx.destination);
+
+      state.stream = stream;
+      state.audioCtx = audioCtx;
+      state.source = source;
+      state.processor = processor;
+      state.started = true;
+      state.ws.onclose = () => {
+        if (state.started) {
+          stopMic();
+          if (SHOULD_LISTEN) {
+            setTimeout(() => { startMic(); }, 400);
+          }
+        }
+      };
+    } catch (e) {
+      stopMic();
+    } finally {
+      state.connecting = false;
+    }
+  }
+
+  if (SHOULD_LISTEN) {
+    startMic();
+  } else {
+    stopMic();
+  }
+})();
+</script>
+"""
+
+components.html(
+    mic_script.replace("__LISTENING__", "true" if st.session_state.listening else "false")
+    .replace("__INGEST_WS__", TRANSCRIBER_INGEST_WS),
     height=0,
 )
 

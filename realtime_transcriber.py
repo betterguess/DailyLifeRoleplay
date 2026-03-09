@@ -28,6 +28,7 @@ LATEST_FINAL = ""
 CLIENTS: set[WebSocketServerProtocol] = set()
 STATE_LOCK = asyncio.Lock()
 INGEST_QUEUE: asyncio.Queue[bytes] | None = None
+LAST_INGEST_AT = 0.0
 
 
 @dataclass
@@ -52,6 +53,9 @@ class RuntimeConfig:
     azure_speech_key: str
     azure_speech_region: str
     azure_language: str
+    azure_segmentation_silence_ms: int
+    log_file: str
+    azure_allow_fallback_final: bool
 
 
 class LocalWhisperProvider:
@@ -128,6 +132,22 @@ def parse_args() -> RuntimeConfig:
     parser.add_argument("--azure-speech-key", default=os.getenv("AZURE_SPEECH_KEY", ""))
     parser.add_argument("--azure-speech-region", default=os.getenv("AZURE_SPEECH_REGION", ""))
     parser.add_argument("--azure-language", default=os.getenv("AZURE_SPEECH_LANGUAGE", "da-DK"))
+    parser.add_argument(
+        "--azure-segmentation-silence-ms",
+        type=int,
+        default=int(os.getenv("AZURE_SEGMENTATION_SILENCE_MS", "1600")),
+        help="Pause duration before Azure emits final segment (ms)",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=os.getenv("STT_LOG_FILE", ""),
+        help="Optional file path for transcriber logs",
+    )
+    parser.add_argument(
+        "--azure-allow-fallback-final",
+        action="store_true",
+        help="Allow partial->final fallback while using Azure provider (default: disabled)",
+    )
 
     args = parser.parse_args()
     return RuntimeConfig(
@@ -151,6 +171,9 @@ def parse_args() -> RuntimeConfig:
         azure_speech_key=args.azure_speech_key,
         azure_speech_region=args.azure_speech_region,
         azure_language=args.azure_language,
+        azure_segmentation_silence_ms=args.azure_segmentation_silence_ms,
+        log_file=args.log_file,
+        azure_allow_fallback_final=args.azure_allow_fallback_final,
     )
 
 
@@ -173,8 +196,10 @@ async def broadcast(payload: dict[str, str]) -> None:
 
 
 async def enqueue_ingest_bytes(chunk: bytes) -> None:
+    global LAST_INGEST_AT
     if not chunk or INGEST_QUEUE is None:
         return
+    LAST_INGEST_AT = time.time()
     if INGEST_QUEUE.full():
         with contextlib.suppress(asyncio.QueueEmpty):
             INGEST_QUEUE.get_nowait()
@@ -333,6 +358,11 @@ async def run_azure_local_mic(cfg: RuntimeConfig, event_queue: asyncio.Queue[tup
     loop = asyncio.get_running_loop()
     speech_config = speechsdk.SpeechConfig(subscription=cfg.azure_speech_key, region=cfg.azure_speech_region)
     speech_config.speech_recognition_language = cfg.azure_language
+    with contextlib.suppress(Exception):
+        speech_config.set_property(
+            speechsdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
+            str(cfg.azure_segmentation_silence_ms),
+        )
     audio_config = speechsdk.audio.AudioConfig(use_default_microphone=True)
     recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
 
@@ -374,6 +404,11 @@ async def run_azure_browser_ingest(cfg: RuntimeConfig, event_queue: asyncio.Queu
     loop = asyncio.get_running_loop()
     speech_config = speechsdk.SpeechConfig(subscription=cfg.azure_speech_key, region=cfg.azure_speech_region)
     speech_config.speech_recognition_language = cfg.azure_language
+    with contextlib.suppress(Exception):
+        speech_config.set_property(
+            speechsdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
+            str(cfg.azure_segmentation_silence_ms),
+        )
 
     fmt = speechsdk.audio.AudioStreamFormat(samples_per_second=cfg.sample_rate, bits_per_sample=16, channels=1)
     push_stream = speechsdk.audio.PushAudioInputStream(stream_format=fmt)
@@ -404,7 +439,7 @@ async def run_azure_browser_ingest(cfg: RuntimeConfig, event_queue: asyncio.Queu
                 continue
             chunk = await INGEST_QUEUE.get()
             if chunk:
-                push_stream.write(chunk)
+                await asyncio.to_thread(push_stream.write, chunk)
     finally:
         with contextlib.suppress(Exception):
             push_stream.close()
@@ -438,17 +473,92 @@ async def provider_loop(cfg: RuntimeConfig, event_queue: asyncio.Queue[tuple[str
     await run_local_provider(cfg, event_queue)
 
 
-async def event_broadcast_loop(event_queue: asyncio.Queue[tuple[str, str]]) -> None:
+async def event_broadcast_loop(cfg: RuntimeConfig, event_queue: asyncio.Queue[tuple[str, str]]) -> None:
     global LATEST_FINAL
+    pending_partial = ""
+    pending_partial_at = 0.0
+    last_final_text = ""
+    last_final_at = 0.0
+    partial_finalize_after_s = 2.2
+    ingest_idle_before_finalize_s = 0.7
+    duplicate_final_window_s = 2.0
+    short_fallback_after_s = 6.0
+
+    fallback_enabled = True
+    if cfg.provider == "azure":
+        partial_finalize_after_s = 3.0
+        ingest_idle_before_finalize_s = 1.2
+        if cfg.audio_source == "browser" and not cfg.azure_allow_fallback_final:
+            fallback_enabled = False
+
+    async def emit_final(text: str, source: str) -> None:
+        nonlocal last_final_text, last_final_at
+        text = (text or "").strip()
+        if not text:
+            return
+        now = time.time()
+        if text == last_final_text and (now - last_final_at) < duplicate_final_window_s:
+            return
+        last_final_text = text
+        last_final_at = now
+        async with STATE_LOCK:
+            global LATEST_FINAL
+            LATEST_FINAL = text
+        await broadcast({"final": text})
+        logging.info("Final (%s): %s", source, text)
+
     while True:
-        kind, text = await event_queue.get()
+        try:
+            kind, text = await asyncio.wait_for(event_queue.get(), timeout=0.25)
+        except asyncio.TimeoutError:
+            now = time.time()
+            partial_stale = pending_partial and (now - pending_partial_at) >= partial_finalize_after_s
+            ingest_idle = (now - LAST_INGEST_AT) >= ingest_idle_before_finalize_s
+            if fallback_enabled and partial_stale and ingest_idle:
+                text = pending_partial.strip()
+                words = len(text.split())
+                long_enough = words >= 2 or len(text) >= 8
+
+                # Avoid aggressive one-word finals such as "med" while user is
+                # likely still forming the utterance.
+                if not long_enough and (now - pending_partial_at) < short_fallback_after_s:
+                    logging.info("Fallback suppressed (partial too short): %s", text)
+                    continue
+
+                pending_partial = ""
+                await emit_final(text, "fallback_from_partial")
+            continue
+
+        if kind == "partial":
+            text = (text or "").strip()
+            if text:
+                pending_partial = text
+                pending_partial_at = time.time()
+                await broadcast({"partial": text})
+            continue
+
         if kind == "final":
-            async with STATE_LOCK:
-                LATEST_FINAL = text
-            await broadcast({"final": text})
-            logging.info("Final: %s", text)
-        elif kind == "partial":
-            await broadcast({"partial": text})
+            now = time.time()
+            text_clean = (text or "").strip()
+            ingest_recently_active = (now - LAST_INGEST_AT) < ingest_idle_before_finalize_s
+
+            # Azure can sometimes emit early finals mid-utterance.
+            # If ingest is still active, treat finals as partial and wait for
+            # real silence before emitting final.
+            if (
+                cfg.provider == "azure"
+                and cfg.audio_source == "browser"
+                and ingest_recently_active
+            ):
+                pending_partial = text_clean
+                pending_partial_at = now
+                if text_clean:
+                    await broadcast({"partial": text_clean})
+                logging.info("Final downgraded to partial (azure-active-ingest): %s", text_clean)
+                continue
+
+            pending_partial = ""
+            await emit_final(text_clean, "provider")
 
 
 async def ws_handler(websocket: WebSocketServerProtocol, path: str) -> None:
@@ -469,6 +579,8 @@ async def ws_handler(websocket: WebSocketServerProtocol, path: str) -> None:
                 if isinstance(message, (bytes, bytearray)):
                     await enqueue_ingest_bytes(bytes(message))
                 # optional JSON control messages are ignored for now
+        except Exception as exc:
+            logging.warning("Ingest client error: %s", exc)
         finally:
             logging.info("Ingest client disconnected")
         return
@@ -528,7 +640,15 @@ async def main() -> None:
     global INGEST_QUEUE
 
     cfg = parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if cfg.log_file.strip():
+        log_handlers.append(logging.FileHandler(cfg.log_file.strip(), encoding="utf-8"))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=log_handlers,
+        force=True,
+    )
 
     if cfg.list_input_devices:
         print_input_devices()
@@ -538,15 +658,20 @@ async def main() -> None:
     event_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=512)
 
     logging.info(
-        "Starting transcriber provider=%s source=%s on %s:%s (ws: /ingest + /transcribe, http: /final)",
+        "Starting transcriber provider=%s source=%s on %s:%s (ws: /ingest + /transcribe, http: /final) azure_segmentation_silence_ms=%s",
         cfg.provider,
         cfg.audio_source,
         cfg.host,
         cfg.port,
+        cfg.azure_segmentation_silence_ms,
+    )
+    logging.info(
+        "Azure fallback-final policy: %s",
+        "enabled" if cfg.azure_allow_fallback_final else "disabled",
     )
 
     async with serve(ws_handler, cfg.host, cfg.port, process_request=process_request, max_size=2_000_000):
-        await asyncio.gather(provider_loop(cfg, event_queue), event_broadcast_loop(event_queue))
+        await asyncio.gather(provider_loop(cfg, event_queue), event_broadcast_loop(cfg, event_queue))
 
 
 if __name__ == "__main__":

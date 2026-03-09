@@ -96,6 +96,14 @@ export AZURE_SPEECH_REGION="westeurope"
 .venv/bin/python realtime_transcriber.py --provider azure --audio-source browser --azure-language da-DK
 ```
 
+In Azure + browser mode, partial->final fallback is disabled by default to avoid mid-sentence cutoffs.
+Use `--azure-allow-fallback-final` only if you explicitly want fallback finals.
+
+Write transcriber logs to file:
+```bash
+.venv/bin/python realtime_transcriber.py --provider azure --audio-source browser --azure-language da-DK --log-file logs/transcriber.log
+```
+
 `--provider auto` tries Azure first (when credentials are present), then falls back to local Whisper.
 
 It exposes:

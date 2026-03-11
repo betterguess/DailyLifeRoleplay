@@ -972,6 +972,8 @@ mic_script = _load_frontend_script(
     {
         "__LISTENING__": "true" if st.session_state.listening else "false",
         "__INGEST_WS__": TRANSCRIBER_INGEST_WS,
+        "__DEBUG_MIC__": "true" if os.getenv("DEBUG_MIC", "").strip().lower() in {"1", "true", "yes", "on"} else "false",
+        "__MIC_SILENCE_RMS__": os.getenv("MIC_SILENCE_RMS", "0.006"),
     },
 )
 

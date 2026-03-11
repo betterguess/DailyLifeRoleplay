@@ -72,6 +72,13 @@ pip install -r requirements-dev.txt
 .venv/bin/python realtime_transcriber.py --provider auto --audio-source browser --language da
 ```
 
+Start app + transcriber together (clears logs first):
+```bash
+./scripts/start_services.sh
+# stop again:
+./scripts/stop_services.sh
+```
+
 Browser microphone is streamed to:
 ```
 ws://localhost:9000/ingest
@@ -98,6 +105,11 @@ export AZURE_SPEECH_REGION="westeurope"
 
 In Azure + browser mode, partial->final fallback is disabled by default to avoid mid-sentence cutoffs.
 Use `--azure-allow-fallback-final` only if you explicitly want fallback finals.
+
+Optional browser mic silence gate (helps fallback detect idle):
+```bash
+export MIC_SILENCE_RMS=0.006
+```
 
 Write transcriber logs to file:
 ```bash

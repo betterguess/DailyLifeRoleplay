@@ -486,10 +486,13 @@ async def event_broadcast_loop(cfg: RuntimeConfig, event_queue: asyncio.Queue[tu
 
     fallback_enabled = True
     if cfg.provider == "azure":
-        partial_finalize_after_s = 3.0
-        ingest_idle_before_finalize_s = 1.2
-        if cfg.audio_source == "browser" and not cfg.azure_allow_fallback_final:
-            fallback_enabled = False
+        # More conservative fallback settings for Azure browser ingest.
+        partial_finalize_after_s = 3.2
+        ingest_idle_before_finalize_s = 1.6
+        # Keep fallback available in browser mode to prevent partial-only stalls.
+        # The short-utterance guards below prevent early mid-sentence finals.
+        if cfg.audio_source == "browser":
+            fallback_enabled = True
 
     async def emit_final(text: str, source: str) -> None:
         nonlocal last_final_text, last_final_at
@@ -517,7 +520,11 @@ async def event_broadcast_loop(cfg: RuntimeConfig, event_queue: asyncio.Queue[tu
             if fallback_enabled and partial_stale and ingest_idle:
                 text = pending_partial.strip()
                 words = len(text.split())
-                long_enough = words >= 2 or len(text) >= 8
+                if cfg.provider == "azure" and cfg.audio_source == "browser":
+                    # Allow short but valid Danish responses like "med maskine".
+                    long_enough = words >= 2 or len(text) >= 10
+                else:
+                    long_enough = words >= 2 or len(text) >= 8
 
                 # Avoid aggressive one-word finals such as "med" while user is
                 # likely still forming the utterance.
@@ -665,10 +672,15 @@ async def main() -> None:
         cfg.port,
         cfg.azure_segmentation_silence_ms,
     )
-    logging.info(
-        "Azure fallback-final policy: %s",
-        "enabled" if cfg.azure_allow_fallback_final else "disabled",
-    )
+    if cfg.provider == "azure" and cfg.audio_source == "browser":
+        logging.info(
+            "Azure fallback-final policy: guarded-enabled (idle>=1.6s, min_words>=2 or len>=10)"
+        )
+    else:
+        logging.info(
+            "Azure fallback-final policy: %s",
+            "enabled" if cfg.azure_allow_fallback_final else "disabled",
+        )
 
     async with serve(ws_handler, cfg.host, cfg.port, process_request=process_request, max_size=2_000_000):
         await asyncio.gather(provider_loop(cfg, event_queue), event_broadcast_loop(cfg, event_queue))

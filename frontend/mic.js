@@ -1,8 +1,25 @@
 <script type="module">
 const SHOULD_LISTEN = __LISTENING__;
 const INGEST_WS = "__INGEST_WS__";
+const DEBUG_MIC = __DEBUG_MIC__;
 const TARGET_SR = 16000;
+const SILENCE_RMS_THRESHOLD = __MIC_SILENCE_RMS__;
 const root = (window.parent && window.parent.window) ? window.parent.window : window;
+const LOG_PREFIX = "[mic]";
+
+function logInfo(message, extra) {
+  if (!DEBUG_MIC) return;
+  if (extra !== undefined) {
+    console.info(`${LOG_PREFIX} ${message}`, extra);
+  } else {
+    console.info(`${LOG_PREFIX} ${message}`);
+  }
+}
+
+function logError(message, error) {
+  if (!DEBUG_MIC) return;
+  console.error(`${LOG_PREFIX} ${message}`, error);
+}
 
 function downsampleTo16k(float32Array, sourceRate) {
   if (sourceRate === TARGET_SR) return float32Array;
@@ -40,6 +57,16 @@ function toInt16Buffer(float32Array) {
   return pcm16.buffer;
 }
 
+function rms(samples) {
+  if (!samples || samples.length === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    sum += s * s;
+  }
+  return Math.sqrt(sum / samples.length);
+}
+
 function ensureMicState() {
   if (!root.__dlrMic) {
     root.__dlrMic = {
@@ -52,6 +79,8 @@ function ensureMicState() {
       processor: null,
       connecting: false,
       watchdogTimer: null,
+      lastProcessAt: 0,
+      lastSentAt: 0,
     };
   }
   return root.__dlrMic;
@@ -85,13 +114,18 @@ function stopMic(state) {
 function wireProcessor(state, audioCtx, processor) {
   processor.onaudioprocess = (event) => {
     try {
+      state.lastProcessAt = Date.now();
       const wsOpen = state.ws && state.ws.readyState === root.WebSocket.OPEN;
       if (!state.started || !wsOpen) return;
 
       const input = event.inputBuffer.getChannelData(0);
       const downsampled = downsampleTo16k(input, audioCtx.sampleRate);
+      if (rms(downsampled) < SILENCE_RMS_THRESHOLD) {
+        return;
+      }
       const pcm = toInt16Buffer(downsampled);
       state.ws.send(pcm);
+      state.lastSentAt = Date.now();
     } catch (error) {
       // ignore transient audio/ws errors
     }
@@ -101,6 +135,9 @@ function wireProcessor(state, audioCtx, processor) {
 async function openIngestSocket() {
   const ws = new root.WebSocket(INGEST_WS);
   ws.binaryType = "arraybuffer";
+  ws.onerror = (event) => {
+    logError("websocket error", event);
+  };
 
   await new Promise((resolve, reject) => {
     ws.onopen = () => resolve();
@@ -138,9 +175,11 @@ async function startMic(state) {
   if (state.started || state.connecting) return;
 
   state.connecting = true;
+  logInfo("startMic attempt");
   try {
     const ws = await openIngestSocket();
     state.ws = ws;
+    logInfo("websocket connected");
 
     const { stream, audioCtx, source, processor } = await createAudioGraph();
     wireProcessor(state, audioCtx, processor);
@@ -150,17 +189,22 @@ async function startMic(state) {
     state.source = source;
     state.processor = processor;
     state.started = true;
+    state.lastProcessAt = Date.now();
+    state.lastSentAt = Date.now();
 
     ws.onclose = () => {
       const wasStarted = state.started;
+      logInfo("websocket closed", { wasStarted, desiredListening: state.desiredListening });
       if (!wasStarted) return;
 
       stopMic(state);
       if (state.desiredListening) {
+        logInfo("reconnect scheduled");
         root.setTimeout(() => startMic(state), 400);
       }
     };
   } catch (error) {
+    logError("startMic failed", error);
     stopMic(state);
   } finally {
     state.connecting = false;
@@ -173,7 +217,30 @@ function ensureWatchdog(state) {
   state.watchdogTimer = root.setInterval(() => {
     if (state.desiredListening) {
       const wsOpen = state.ws && state.ws.readyState === root.WebSocket.OPEN;
-      if (!state.started || !wsOpen) {
+      const streamTracks = state.stream ? state.stream.getAudioTracks() : [];
+      const micLive = streamTracks.some((track) => track.readyState === "live");
+      const now = Date.now();
+      const stalledProcessor = state.started && state.lastProcessAt > 0 && (now - state.lastProcessAt) > 3000;
+      const audioSuspended = state.audioCtx && state.audioCtx.state && state.audioCtx.state !== "running";
+
+      if (audioSuspended && state.audioCtx && typeof state.audioCtx.resume === "function") {
+        state.audioCtx.resume().catch(() => {});
+      }
+
+      if (!state.started || !wsOpen || !micLive || stalledProcessor) {
+        logInfo("watchdog restart", {
+          started: state.started,
+          wsOpen: Boolean(wsOpen),
+          micLive,
+          stalledProcessor,
+          audioState: state.audioCtx ? state.audioCtx.state : "none",
+          msSinceProcess: state.lastProcessAt ? now - state.lastProcessAt : null,
+          msSinceSent: state.lastSentAt ? now - state.lastSentAt : null,
+          trackCount: streamTracks.length,
+        });
+        if (state.started) {
+          stopMic(state);
+        }
         startMic(state);
       }
       return;

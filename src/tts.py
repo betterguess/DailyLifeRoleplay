@@ -2,6 +2,7 @@ import re
 import socket
 import threading
 import logging
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
@@ -27,45 +28,65 @@ def strip_emojis(text: str) -> str:
 
 
 def build_speak() -> Callable[[str], None]:
-    """Build speech callback with Azure Speech first and local fallback."""
+    """Build speech callback with Azure Speech primary and optional local fallback."""
+    voice_name = os.getenv("AZURE_TTS_VOICE", "da-DK-JeppeNeural").strip() or "da-DK-JeppeNeural"
+    allow_local_fallback = (
+        os.getenv("ALLOW_LOCAL_TTS_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
     try:
         import azure.cognitiveservices.speech as speechsdk
+        azure_tts_lock = threading.Lock()
+        logging.info("TTS backend: azure voice=%s", voice_name)
 
         def speak(text: str):
             clean_text = strip_emojis(text)
+            if not clean_text.strip():
+                return
             speech_config = speechsdk.SpeechConfig(
                 subscription=get_secret("AZURE_SPEECH_KEY"),
                 region=get_secret("AZURE_SPEECH_REGION"),
             )
-            speech_config.speech_synthesis_voice_name = "da-DK-JeppeNeural"
+            speech_config.speech_synthesis_voice_name = voice_name
             audio_config = speechsdk.audio.AudioOutputConfig(use_default_speaker=True)
-            synthesizer = speechsdk.SpeechSynthesizer(
-                speech_config=speech_config,
-                audio_config=audio_config,
-            )
-            result = synthesizer.speak_text_async(clean_text).get()
-            if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-                return
-            else:
+            try:
+                with azure_tts_lock:
+                    synthesizer = speechsdk.SpeechSynthesizer(
+                        speech_config=speech_config,
+                        audio_config=audio_config,
+                    )
+                    result = synthesizer.speak_text_async(clean_text).get()
+                if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+                    return
                 logging.warning("TTS failed: %s", result.reason)
+            except Exception as exc:
+                logging.warning("TTS exception: %s", exc)
 
         return speak
-    except Exception:
-        try:
-            import pyttsx3
+    except Exception as exc:
+        logging.warning("Azure TTS unavailable: %s", exc)
+        if allow_local_fallback:
+            try:
+                import pyttsx3
 
-            engine = pyttsx3.init()
+                engine = pyttsx3.init()
+                local_tts_lock = threading.Lock()
+                logging.info("TTS backend: pyttsx3 (local fallback enabled)")
 
-            def speak(text: str):
-                engine.say(text)
-                engine.runAndWait()
+                def speak(text: str):
+                    if not (text or "").strip():
+                        return
+                    with local_tts_lock:
+                        engine.say(text)
+                        engine.runAndWait()
 
-            return speak
-        except ImportError:
-            def speak(text: str):
-                logging.warning("TTS not available on this environment.")
+                return speak
+            except ImportError:
+                pass
 
-            return speak
+        def speak(text: str):
+            logging.warning("TTS unavailable (azure failed, local fallback disabled).")
+
+        return speak
 
 
 def _make_handler(

@@ -69,7 +69,23 @@ Run the provided speech service (realtime partial + final transcription):
 
 ```bash
 pip install -r requirements-dev.txt
-.venv/bin/python realtime_transcriber.py --provider auto --language da
+.venv/bin/python realtime_transcriber.py --provider auto --audio-source browser --language da
+```
+
+Start app + transcriber together (clears logs first):
+```bash
+./scripts/start_services.sh
+# stop again:
+./scripts/stop_services.sh
+# restart:
+./scripts/restart_services.sh
+```
+
+Open the app at `http://localhost:8501` (not `0.0.0.0`) to ensure browser microphone access works reliably.
+
+Browser microphone is streamed to:
+```
+ws://localhost:9000/ingest
 ```
 
 List local microphones (for local provider testing):
@@ -88,13 +104,29 @@ Azure STT mode (same websocket output, cloud transcription):
 ```bash
 export AZURE_SPEECH_KEY="..."
 export AZURE_SPEECH_REGION="westeurope"
-.venv/bin/python realtime_transcriber.py --provider azure --azure-language da-DK
+.venv/bin/python realtime_transcriber.py --provider azure --audio-source browser --azure-language da-DK
+```
+
+In Azure + browser mode, partial->final fallback is disabled by default to avoid mid-sentence cutoffs.
+Use `--azure-allow-fallback-final` only if you explicitly want fallback finals.
+
+Optional browser mic silence gate (helps fallback detect idle):
+```bash
+export MIC_SILENCE_RMS=0.002
+# if speech is still dropped (for example with in-ear/Bluetooth mics):
+export MIC_SILENCE_RMS=0
+```
+
+Write transcriber logs to file:
+```bash
+.venv/bin/python realtime_transcriber.py --provider azure --audio-source browser --azure-language da-DK --log-file logs/transcriber.log
 ```
 
 `--provider auto` tries Azure first (when credentials are present), then falls back to local Whisper.
 
 It exposes:
 ```
+ws://localhost:9000/ingest
 ws://localhost:9000/transcribe
 http://localhost:9000/final
 ```
@@ -103,7 +135,11 @@ http://localhost:9000/final
 {"text": "Jeg vil gerne købe noget kød."}
 ```
 
-=======
+If app and transcriber run on different hosts/containers, set app websocket URL:
+```bash
+export TRANSCRIBER_WS=ws://localhost:9000/transcribe
+export TRANSCRIBER_INGEST_WS=ws://localhost:9000/ingest
+```
 
 #### STT runbook (drift + fejlfind)
 
@@ -132,7 +168,6 @@ Quick troubleshooting:
 - No transcript in app: verify transcriber is running on port `9000` and app uses `ws://localhost:9000/transcribe`
 - Low STT quality: ensure `AZURE_SPEECH_LANGUAGE=da-DK`
 
-=======
 ### 5. Launch the Streamlit interface
 ```bash
 python -m streamlit run app.py

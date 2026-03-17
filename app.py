@@ -1,11 +1,13 @@
 import asyncio
 import difflib
 import json
+import os
 import queue
 import re
 import socket
 import threading
 import time
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import streamlit as st
@@ -37,7 +39,11 @@ from src.scenarios import load_scenarios
 from src.tts import build_speak, ensure_hover_tts_server, start_tts_server
 
 
-TRANSCRIBER_WS = "ws://localhost:9000/transcribe"
+TRANSCRIBER_WS = os.getenv("TRANSCRIBER_WS", "ws://localhost:9000/transcribe")
+TRANSCRIBER_INGEST_WS = os.getenv(
+    "TRANSCRIBER_INGEST_WS",
+    "auto",
+)
 HOVER_TTS_PORT = 8765
 
 st.set_page_config(page_title="Aphasia Conversation Trainer", layout="wide")
@@ -314,6 +320,32 @@ def _log_activity(event_type: str, payload: dict | None = None) -> None:
     log_event(user.username, event_type, payload or {})
 
 
+def _speech_debug(message: str) -> None:
+    logs = st.session_state.get("speech_debug_log")
+    if logs is None:
+        logs = []
+        st.session_state.speech_debug_log = logs
+    ts = time.strftime("%H:%M:%S")
+    line = f"{ts} {message}"
+    logs.append(line)
+    if len(logs) > 120:
+        del logs[: len(logs) - 120]
+    log_path = os.getenv("APP_SPEECH_LOG_FILE", "").strip()
+    if log_path:
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
+
+def _load_frontend_script(path: str, replacements: dict[str, str]) -> str:
+    content = Path(path).read_text(encoding="utf-8")
+    for key, value in replacements.items():
+        content = content.replace(key, value)
+    return content
+
+
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", (text or "").lower())).strip()
 
@@ -344,18 +376,22 @@ def _looks_like_assistant_echo(transcript: str) -> bool:
 
     similarity = difflib.SequenceMatcher(None, a, b).ratio()
     in_guard_window = time.time() < float(st.session_state.get("speech_ignore_until", 0.0))
+    short_user_reply = len(a) <= 10 or len(a.split()) <= 2
 
     # During guard window, only suppress if the transcript is very close to
     # the assistant's most recent spoken reply.
     if in_guard_window:
-        return a == b or a in b or b in a or similarity >= 0.78
+        if short_user_reply:
+            return a == b or similarity >= 0.95
+        return a == b or similarity >= 0.84
 
     # Outside the guard window we still suppress near-identical repeats.
-    return a == b or similarity >= 0.90
+    return a == b or similarity >= 0.94
 
 
 def _speak_async(text: str) -> None:
     _mark_tts_guard(text)
+    _speech_debug(f"tts_triggered={((text or '').strip())[:80]}")
     threading.Thread(target=speak, args=(text,), daemon=True).start()
 
 
@@ -365,8 +401,10 @@ for key, default in {
     "emoji_opts": [],
     "input_mode": "Text",
     "listening": False,
+    "listening_toggle": False,
     "speech_partial": "",
     "speech_error": "",
+    "speech_debug_log": [],
     "speech_ws_thread": None,
     "speech_event_queue": None,
     "speech_stop_event": None,
@@ -577,9 +615,11 @@ with st.sidebar:
             st.rerun()
 
     st.header("🎛️ Indstillinger")
-    new_listen = st.toggle("🎙 Taleinput (WebSocket)", value=st.session_state.listening)
-    if new_listen != st.session_state.listening:
-        st.session_state.listening = new_listen
+    prev_listen = st.session_state.listening
+    new_listen = st.toggle("🎙 Taleinput (WebSocket)", key="listening_toggle")
+    st.session_state.listening = new_listen
+    if new_listen != prev_listen:
+        _speech_debug(f"listening={'on' if new_listen else 'off'}")
         if not new_listen:
             st.session_state.speech_partial = ""
             stop_evt = st.session_state.get("speech_stop_event")
@@ -591,6 +631,16 @@ with st.sidebar:
 
     if st.session_state.speech_error:
         st.caption(f"⚠️ Taleinput: {st.session_state.speech_error}")
+
+    with st.expander("🧪 Speech debug log", expanded=False):
+        if st.button("Ryd speech log", key="clear_speech_debug"):
+            st.session_state.speech_debug_log = []
+            st.rerun()
+        debug_lines = st.session_state.get("speech_debug_log", [])
+        if debug_lines:
+            st.code("\n".join(debug_lines[-40:]), language="text")
+        else:
+            st.caption("Ingen logs endnu.")
 
     new_mode = st.radio(
         "Input-tilstand",
@@ -714,8 +764,10 @@ def _queue_speech_event(event_queue: queue.Queue, kind: str, text: str) -> None:
 async def ws_task(event_queue: queue.Queue, stop_event: threading.Event):
     while not stop_event.is_set():
         try:
+            _queue_speech_event(event_queue, "debug", "ws_connect_attempt")
             async with websockets.connect(TRANSCRIBER_WS) as ws:
                 _queue_speech_event(event_queue, "status", "Forbundet")
+                _queue_speech_event(event_queue, "debug", "ws_connected")
                 while not stop_event.is_set():
                     try:
                         data = await asyncio.wait_for(ws.recv(), timeout=1.0)
@@ -731,6 +783,7 @@ async def ws_task(event_queue: queue.Queue, stop_event: threading.Event):
                     _queue_speech_event(event_queue, "final", payload.get("final", ""))
         except Exception as exc:
             _queue_speech_event(event_queue, "error", f"Ingen forbindelse til transcriber ({exc})")
+            _queue_speech_event(event_queue, "debug", f"ws_error={exc}")
             await asyncio.sleep(1.0)
 
 
@@ -738,67 +791,81 @@ def start_ws(event_queue: queue.Queue, stop_event: threading.Event):
     asyncio.run(ws_task(event_queue, stop_event))
 
 
-if st.session_state.listening:
-    if st.session_state.speech_event_queue is None:
-        st.session_state.speech_event_queue = queue.Queue(maxsize=256)
-    if st.session_state.speech_stop_event is None or st.session_state.speech_stop_event.is_set():
-        st.session_state.speech_stop_event = threading.Event()
+@st.fragment(run_every=1.2)
+def _speech_runtime_fragment() -> None:
+    if st.session_state.listening:
+        if st.session_state.speech_event_queue is None:
+            st.session_state.speech_event_queue = queue.Queue(maxsize=256)
+        if st.session_state.speech_stop_event is None or st.session_state.speech_stop_event.is_set():
+            st.session_state.speech_stop_event = threading.Event()
 
-    current_ws_thread = st.session_state.get("speech_ws_thread")
-    if current_ws_thread is None or not current_ws_thread.is_alive():
-        ws_thread = threading.Thread(
-            target=start_ws,
-            args=(st.session_state.speech_event_queue, st.session_state.speech_stop_event),
-            daemon=True,
-        )
-        ws_thread.start()
-        st.session_state.speech_ws_thread = ws_thread
-else:
-    stop_evt = st.session_state.get("speech_stop_event")
-    if stop_evt:
-        stop_evt.set()
-
-
-speech_queue = st.session_state.get("speech_event_queue")
-if speech_queue is not None:
-    handled_final = False
-    for _ in range(32):
-        try:
-            kind, text = speech_queue.get_nowait()
-        except queue.Empty:
-            break
-
-        if kind == "error":
-            st.session_state.speech_error = text
-            continue
-        if kind == "status":
-            st.session_state.speech_error = ""
-            continue
-        if kind == "partial":
-            st.session_state.speech_partial = text
-            continue
-        if kind == "final":
-            if _looks_like_assistant_echo(text):
-                continue
-            st.session_state.speech_partial = ""
-            st.session_state.messages.append({"role": "user", "content": text})
-            _log_activity("user_message", {"source": "speech", "text": text})
-            reply = query_model(text)
-            st.session_state.messages.append(
-                {"role": "assistant", "content": reply.get("assistant_reply", "")}
+        current_ws_thread = st.session_state.get("speech_ws_thread")
+        if current_ws_thread is None or not current_ws_thread.is_alive():
+            ws_thread = threading.Thread(
+                target=start_ws,
+                args=(st.session_state.speech_event_queue, st.session_state.speech_stop_event),
+                daemon=True,
             )
-            _log_activity("assistant_reply", {"source": "speech"})
-            st.session_state.text_opts = reply.get("text_suggestions", [])
-            st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
-            _speak_async(reply.get("assistant_reply", ""))
-            handled_final = True
-            break
+            ws_thread.start()
+            st.session_state.speech_ws_thread = ws_thread
+            _speech_debug("ws_thread_started")
+    else:
+        stop_evt = st.session_state.get("speech_stop_event")
+        if stop_evt:
+            stop_evt.set()
+            _speech_debug("ws_stop_event_set")
+
+    speech_queue = st.session_state.get("speech_event_queue")
+    handled_final = False
+    if speech_queue is not None:
+        for _ in range(32):
+            try:
+                kind, text = speech_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if kind == "error":
+                st.session_state.speech_error = text
+                _speech_debug(f"error={text}")
+                continue
+            if kind == "status":
+                st.session_state.speech_error = ""
+                _speech_debug("status=connected")
+                continue
+            if kind == "debug":
+                _speech_debug(text)
+                continue
+            if kind == "partial":
+                st.session_state.speech_partial = text
+                _speech_debug(f"partial={text[:80]}")
+                continue
+            if kind == "final":
+                if _looks_like_assistant_echo(text):
+                    _speech_debug(f"final_dropped_echo={text[:80]}")
+                    continue
+                st.session_state.speech_partial = ""
+                st.session_state.messages.append({"role": "user", "content": text})
+                _log_activity("user_message", {"source": "speech", "text": text})
+                reply = query_model(text)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": reply.get("assistant_reply", "")}
+                )
+                _log_activity("assistant_reply", {"source": "speech"})
+                st.session_state.text_opts = reply.get("text_suggestions", [])
+                st.session_state.emoji_opts = reply.get("emoji_suggestions", [])
+                _speak_async(reply.get("assistant_reply", ""))
+                _speech_debug(f"final_processed={text[:80]}")
+                handled_final = True
+                break
+
+    if st.session_state.speech_partial:
+        st.caption(f"🟡 Partiel: {st.session_state.speech_partial}")
 
     if handled_final:
         st.rerun()
 
-if st.session_state.speech_partial:
-    st.caption(f"🟡 Partiel: {st.session_state.speech_partial}")
+
+_speech_runtime_fragment()
 
 
 if not st.session_state.messages:
@@ -889,86 +956,32 @@ with st.container():
 meta_speak_texts = [opt.get("meaning") or opt.get("display", "") for opt in UNIVERSAL_CHOICES]
 opts_speak_texts = [opt.get("meaning") or opt.get("display", "") for opt in options]
 
-script = """
-<script>
-(function () {
-  const SPEAK_DELAY = 2000;
-  let timer = null, activeElem = null, lastSpoken = "";
-
-  const d = (window.parent && window.parent.document) ? window.parent.document : document;
-
-  function cancelTimer() {
-    if (timer) clearTimeout(timer);
-    timer = null;
-    if (activeElem) { try { activeElem.style.outline = ""; } catch(e){} activeElem = null; }
-  }
-
-  function startTimer(elem) {
-    cancelTimer();
-    activeElem = elem;
-    timer = setTimeout(() => {
-      const text = elem.dataset.tts || elem.innerText || elem.textContent || "";
-      if (text && text !== lastSpoken) {
-        lastSpoken = text;
-        try { elem.style.outline = "2px solid orange"; setTimeout(()=>{elem.style.outline="";}, 900); } catch(e){}
-        fetch("http://localhost:__TTS_PORT__/_tts?text=" + encodeURIComponent(text)).catch(()=>{});
-      }
-    }, SPEAK_DELAY);
-  }
-
-  if (!window.parent.__ttsHoverInstalled) {
-    window.parent.__ttsHoverInstalled = true;
-    d.addEventListener("mouseover", (e) => {
-      const btn = e.target.closest("button");
-      if (btn && btn.textContent.trim() !== "") startTimer(btn);
-    });
-    d.addEventListener("mouseout", (e) => {
-      if (e.target.closest("button")) cancelTimer();
-    });
-    d.addEventListener("touchstart", (e) => {
-      const btn = e.target.closest("button");
-      if (btn && btn.textContent.trim() !== "") startTimer(btn);
-    }, {passive:true});
-    d.addEventListener("touchend", () => cancelTimer(), {passive:true});
-  }
-
-  const metaTexts = __META__;
-  const optTexts  = __OPTS__;
-
-  function applyMappings() {
-    try {
-      const allButtons = d.querySelectorAll("button, [role=button]");
-      let metaIndex = 0;
-      let optIndex  = 0;
-
-      allButtons.forEach((button) => {
-        const label = (button.innerText || button.textContent || "").trim();
-        if (["🆘","😕","👍","👎"].includes(label)) {
-          if (metaTexts[metaIndex]) {
-            button.dataset.tts = metaTexts[metaIndex];
-          }
-          metaIndex++;
-        } else {
-          if (optTexts[optIndex]) {
-            button.dataset.tts = optTexts[optIndex];
-          }
-          optIndex++;
-        }
-      });
-    } catch (e) {
-      setTimeout(applyMappings, 400);
-    }
-  }
-
-  applyMappings();
-})();
-</script>
-"""
+hover_script = _load_frontend_script(
+    "frontend/tts_hover.js",
+    {
+        "__META__": json.dumps(meta_speak_texts),
+        "__OPTS__": json.dumps(opts_speak_texts),
+        "__TTS_PORT__": str(tts_port),
+    },
+)
 
 components.html(
-    script.replace("__META__", json.dumps(meta_speak_texts))
-    .replace("__OPTS__", json.dumps(opts_speak_texts))
-    .replace("__TTS_PORT__", str(tts_port)),
+    hover_script,
+    height=0,
+)
+
+mic_script = _load_frontend_script(
+    "frontend/mic.js",
+    {
+        "__LISTENING__": "true" if st.session_state.listening else "false",
+        "__INGEST_WS__": TRANSCRIBER_INGEST_WS,
+        "__DEBUG_MIC__": "true" if os.getenv("DEBUG_MIC", "").strip().lower() in {"1", "true", "yes", "on"} else "false",
+        "__MIC_SILENCE_RMS__": os.getenv("MIC_SILENCE_RMS", "0.002"),
+    },
+)
+
+components.html(
+    mic_script,
     height=0,
 )
 
@@ -1064,7 +1077,3 @@ div[data-testid="column"] {
     """,
     unsafe_allow_html=True,
 )
-
-if st.session_state.listening:
-    time.sleep(0.25)
-    st.rerun()

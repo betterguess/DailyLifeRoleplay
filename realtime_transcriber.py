@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -29,6 +30,7 @@ CLIENTS: set[WebSocketServerProtocol] = set()
 STATE_LOCK = asyncio.Lock()
 INGEST_QUEUE: asyncio.Queue[bytes] | None = None
 LAST_INGEST_AT = 0.0
+AZURE_STT_RESET_EVENT: asyncio.Event | None = None
 
 
 @dataclass
@@ -204,6 +206,19 @@ async def enqueue_ingest_bytes(chunk: bytes) -> None:
         with contextlib.suppress(asyncio.QueueEmpty):
             INGEST_QUEUE.get_nowait()
     await INGEST_QUEUE.put(chunk)
+
+
+async def flush_ingest_queue() -> int:
+    if INGEST_QUEUE is None:
+        return 0
+    dropped = 0
+    while True:
+        try:
+            INGEST_QUEUE.get_nowait()
+            dropped += 1
+        except asyncio.QueueEmpty:
+            break
+    return dropped
 
 
 def rms(frame: np.ndarray) -> float:
@@ -411,39 +426,57 @@ async def run_azure_browser_ingest(cfg: RuntimeConfig, event_queue: asyncio.Queu
         )
 
     fmt = speechsdk.audio.AudioStreamFormat(samples_per_second=cfg.sample_rate, bits_per_sample=16, channels=1)
-    push_stream = speechsdk.audio.PushAudioInputStream(stream_format=fmt)
-    audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
-    recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
 
-    def on_recognizing(evt) -> None:
-        text = getattr(evt.result, "text", "") or ""
-        if text:
-            loop.call_soon_threadsafe(event_queue.put_nowait, ("partial", text))
+    def start_recognizer():
+        push_stream = speechsdk.audio.PushAudioInputStream(stream_format=fmt)
+        audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
+        recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
 
-    def on_recognized(evt) -> None:
-        reason = getattr(evt.result, "reason", None)
-        if reason == speechsdk.ResultReason.RecognizedSpeech:
+        def on_recognizing(evt) -> None:
             text = getattr(evt.result, "text", "") or ""
             if text:
-                loop.call_soon_threadsafe(event_queue.put_nowait, ("final", text))
+                loop.call_soon_threadsafe(event_queue.put_nowait, ("partial", text))
 
-    recognizer.recognizing.connect(on_recognizing)
-    recognizer.recognized.connect(on_recognized)
-    recognizer.start_continuous_recognition()
+        def on_recognized(evt) -> None:
+            reason = getattr(evt.result, "reason", None)
+            if reason == speechsdk.ResultReason.RecognizedSpeech:
+                text = getattr(evt.result, "text", "") or ""
+                if text:
+                    loop.call_soon_threadsafe(event_queue.put_nowait, ("final", text))
+
+        recognizer.recognizing.connect(on_recognizing)
+        recognizer.recognized.connect(on_recognized)
+        recognizer.start_continuous_recognition()
+        return push_stream, recognizer
+
+    def stop_recognizer(push_stream, recognizer) -> None:
+        with contextlib.suppress(Exception):
+            push_stream.close()
+        with contextlib.suppress(Exception):
+            recognizer.stop_continuous_recognition()
+
+    push_stream, recognizer = start_recognizer()
     logging.info("Azure STT started (browser ingest, language=%s)", cfg.azure_language)
 
     try:
         while True:
+            if AZURE_STT_RESET_EVENT is not None and AZURE_STT_RESET_EVENT.is_set():
+                AZURE_STT_RESET_EVENT.clear()
+                stop_recognizer(push_stream, recognizer)
+                push_stream, recognizer = start_recognizer()
+                logging.info("Azure STT recognizer reset after final")
+
             if INGEST_QUEUE is None:
                 await asyncio.sleep(0.05)
                 continue
-            chunk = await INGEST_QUEUE.get()
+            try:
+                chunk = await asyncio.wait_for(INGEST_QUEUE.get(), timeout=0.25)
+            except asyncio.TimeoutError:
+                continue
             if chunk:
                 await asyncio.to_thread(push_stream.write, chunk)
     finally:
-        with contextlib.suppress(Exception):
-            push_stream.close()
-        recognizer.stop_continuous_recognition()
+        stop_recognizer(push_stream, recognizer)
 
 
 async def run_azure_provider(cfg: RuntimeConfig, event_queue: asyncio.Queue[tuple[str, str]]) -> None:
@@ -478,7 +511,10 @@ async def event_broadcast_loop(cfg: RuntimeConfig, event_queue: asyncio.Queue[tu
     pending_partial = ""
     pending_partial_at = 0.0
     last_final_text = ""
+    last_final_norm = ""
+    last_final_source = ""
     last_final_at = 0.0
+    final_history: list[str] = []
     partial_finalize_after_s = 2.2
     ingest_idle_before_finalize_s = 0.7
     duplicate_final_window_s = 2.0
@@ -487,27 +523,190 @@ async def event_broadcast_loop(cfg: RuntimeConfig, event_queue: asyncio.Queue[tu
     fallback_enabled = True
     if cfg.provider == "azure":
         # More conservative fallback settings for Azure browser ingest.
-        partial_finalize_after_s = 3.2
-        ingest_idle_before_finalize_s = 1.6
+        partial_finalize_after_s = 3.8
+        ingest_idle_before_finalize_s = 2.2
         # Keep fallback available in browser mode to prevent partial-only stalls.
         # The short-utterance guards below prevent early mid-sentence finals.
         if cfg.audio_source == "browser":
             fallback_enabled = True
 
+    def _normalize_words(text: str) -> list[str]:
+        # Tokenize to words to avoid punctuation/casing breaking prefix matches.
+        return [w.lower() for w in re.findall(r"\w+", (text or "").strip(), flags=re.UNICODE)]
+
+    def _normalize_text(text: str) -> str:
+        return " ".join(_normalize_words(text))
+
+    def _looks_incomplete_phrase(text: str) -> bool:
+        words = _normalize_words(text)
+        if not words:
+            return False
+        tail = words[-1]
+        short_complete = {"ja", "ok", "nej", "tak"}
+        if len(tail) <= 2 and tail not in short_complete:
+            return True
+        return tail in {
+            "i",
+            "og",
+            "at",
+            "til",
+            "med",
+            "på",
+            "om",
+            "for",
+            "af",
+            "en",
+            "et",
+            "den",
+            "det",
+            "de",
+            "the",
+        }
+
+    def _is_noise_fragment(text: str) -> bool:
+        words = _normalize_words(text)
+        if not words:
+            return True
+        if len(words) == 1 and len(words[0]) <= 1:
+            return True
+        return False
+
+    def _should_block_short_final(text: str) -> bool:
+        words = _normalize_words(text)
+        if not words:
+            return True
+        if _looks_incomplete_phrase(text):
+            return True
+
+        if len(words) == 1:
+            allowed_single_word = {
+                "ja",
+                "nej",
+                "tak",
+                "kort",
+                "langt",
+                "spidserne",
+                "maskine",
+                "saks",
+                "mellem",
+                "stor",
+                "lille",
+                "kontant",
+                "kortet",
+            }
+            return words[0] not in allowed_single_word
+
+        # Avoid finals ending in a likely cut-off token.
+        short_complete = {"ja", "ok", "nej", "tak"}
+        if len(words[-1]) <= 2 and words[-1] not in short_complete:
+            return True
+        return False
+
+    def _trim_repeated_prefix(text: str, prev_final: str) -> str:
+        """
+        Azure continuous recognition can emit text with previous final as prefix.
+        Trim that prefix to keep each turn focused on newly spoken content.
+        """
+        text_words = _normalize_words(text)
+        prev_words = _normalize_words(prev_final)
+        if len(prev_words) < 2 or len(text_words) <= len(prev_words):
+            return (text or "").strip()
+
+        match = True
+        for idx in range(len(prev_words)):
+            if text_words[idx].lower() != prev_words[idx].lower():
+                match = False
+                break
+
+        if not match:
+            return (text or "").strip()
+
+        trimmed = " ".join(text_words[len(prev_words):]).strip()
+        return trimmed if trimmed else (text or "").strip()
+
+    def _trim_known_prefix(text: str) -> str:
+        """
+        If Azure returns a partial/final that starts with a previously emitted
+        utterance, keep only the newly appended suffix.
+        """
+        text_norm = _normalize_text(text)
+        if len(text_norm.split()) < 2 or not final_history:
+            return (text or "").strip()
+
+        best_prefix = ""
+        for prev in reversed(final_history[-10:]):
+            prev_norm = _normalize_text(prev)
+            if len(prev_norm.split()) < 2:
+                continue
+            if text_norm == prev_norm:
+                continue
+            if text_norm.startswith(prev_norm + " ") and len(prev_norm) > len(best_prefix):
+                best_prefix = prev_norm
+
+        if not best_prefix:
+            return (text or "").strip()
+
+        trimmed = text_norm[len(best_prefix):].strip()
+        return trimmed if trimmed else (text or "").strip()
+
     async def emit_final(text: str, source: str) -> None:
-        nonlocal last_final_text, last_final_at
+        nonlocal last_final_text, last_final_norm, last_final_source, last_final_at, final_history
         text = (text or "").strip()
         if not text:
             return
+        if cfg.provider == "azure" and cfg.audio_source == "browser":
+            text = _trim_repeated_prefix(text, last_final_text)
+            text = _trim_known_prefix(text)
+            text = (text or "").strip()
+            if not text:
+                return
         now = time.time()
-        if text == last_final_text and (now - last_final_at) < duplicate_final_window_s:
+        text_norm = _normalize_text(text)
+        if not text_norm:
             return
+
+        if (text == last_final_text or text_norm == last_final_norm) and (now - last_final_at) < duplicate_final_window_s:
+            return
+
+        # Azure may emit fallback and provider finals for same utterance within
+        # a short window. Suppress the second near-duplicate final.
+        if (
+            cfg.provider == "azure"
+            and cfg.audio_source == "browser"
+            and last_final_norm
+            and (now - last_final_at) < 3.0
+        ):
+            similar = (
+                text_norm.startswith(last_final_norm + " ")
+                or last_final_norm.startswith(text_norm + " ")
+            )
+            if similar:
+                logging.info(
+                    "Final suppressed (near-duplicate %s->%s): %s",
+                    last_final_source or "unknown",
+                    source,
+                    text,
+                )
+                return
+
         last_final_text = text
+        last_final_norm = text_norm
+        last_final_source = source
         last_final_at = now
+        if cfg.provider == "azure" and cfg.audio_source == "browser":
+            final_history.append(text)
+            if len(final_history) > 20:
+                del final_history[: len(final_history) - 20]
         async with STATE_LOCK:
             global LATEST_FINAL
             LATEST_FINAL = text
         await broadcast({"final": text})
+        if cfg.provider == "azure" and cfg.audio_source == "browser":
+            dropped = await flush_ingest_queue()
+            if dropped > 0:
+                logging.info("Ingest queue flushed after final (%s): dropped_chunks=%d", source, dropped)
+            if AZURE_STT_RESET_EVENT is not None:
+                AZURE_STT_RESET_EVENT.set()
         logging.info("Final (%s): %s", source, text)
 
     while True:
@@ -519,6 +718,9 @@ async def event_broadcast_loop(cfg: RuntimeConfig, event_queue: asyncio.Queue[tu
             ingest_idle = (now - LAST_INGEST_AT) >= ingest_idle_before_finalize_s
             if fallback_enabled and partial_stale and ingest_idle:
                 text = pending_partial.strip()
+                if _is_noise_fragment(text):
+                    logging.info("Fallback suppressed (noise fragment): %s", text)
+                    continue
                 words = len(text.split())
                 if cfg.provider == "azure" and cfg.audio_source == "browser":
                     # Allow short but valid Danish responses like "med maskine".
@@ -532,12 +734,31 @@ async def event_broadcast_loop(cfg: RuntimeConfig, event_queue: asyncio.Queue[tu
                     logging.info("Fallback suppressed (partial too short): %s", text)
                     continue
 
+                # If phrase ends with a connector ("... i", "... og"), wait
+                # longer before finalizing to avoid splitting the next word.
+                if _looks_incomplete_phrase(text) and (now - pending_partial_at) < (short_fallback_after_s + 1.5):
+                    logging.info("Fallback suppressed (partial looks incomplete): %s", text)
+                    continue
+
+                if cfg.provider == "azure" and cfg.audio_source == "browser" and _should_block_short_final(text):
+                    blocked_for_s = now - pending_partial_at
+                    logging.info("Fallback suppressed (short/incomplete final): %s", text)
+                    # Drop stale, never-completing fragments after a long wait.
+                    if blocked_for_s > 20.0:
+                        logging.info("Pending partial dropped (stale short/incomplete): %s", text)
+                        pending_partial = ""
+                    continue
+
                 pending_partial = ""
                 await emit_final(text, "fallback_from_partial")
             continue
 
         if kind == "partial":
             text = (text or "").strip()
+            if cfg.provider == "azure" and cfg.audio_source == "browser":
+                if last_final_text:
+                    text = _trim_repeated_prefix(text, last_final_text)
+                text = _trim_known_prefix(text)
             if text:
                 pending_partial = text
                 pending_partial_at = time.time()
@@ -547,6 +768,22 @@ async def event_broadcast_loop(cfg: RuntimeConfig, event_queue: asyncio.Queue[tu
         if kind == "final":
             now = time.time()
             text_clean = (text or "").strip()
+            if cfg.provider == "azure" and cfg.audio_source == "browser":
+                if last_final_text:
+                    text_clean = _trim_repeated_prefix(text_clean, last_final_text)
+                text_clean = _trim_known_prefix(text_clean)
+            if _is_noise_fragment(text_clean):
+                logging.info("Provider final suppressed (noise fragment): %s", text_clean)
+                if text_clean:
+                    pending_partial = text_clean
+                    pending_partial_at = now
+                continue
+            if cfg.provider == "azure" and cfg.audio_source == "browser" and _should_block_short_final(text_clean):
+                logging.info("Provider final suppressed (short/incomplete): %s", text_clean)
+                if text_clean:
+                    pending_partial = text_clean
+                    pending_partial_at = now
+                continue
             ingest_recently_active = (now - LAST_INGEST_AT) < ingest_idle_before_finalize_s
 
             # Azure can sometimes emit early finals mid-utterance.
@@ -557,12 +794,15 @@ async def event_broadcast_loop(cfg: RuntimeConfig, event_queue: asyncio.Queue[tu
                 and cfg.audio_source == "browser"
                 and ingest_recently_active
             ):
-                pending_partial = text_clean
-                pending_partial_at = now
-                if text_clean:
-                    await broadcast({"partial": text_clean})
-                logging.info("Final downgraded to partial (azure-active-ingest): %s", text_clean)
-                continue
+                words = len(text_clean.split())
+                maybe_early = words <= 1 or len(text_clean) < 10
+                if maybe_early:
+                    pending_partial = text_clean
+                    pending_partial_at = now
+                    if text_clean:
+                        await broadcast({"partial": text_clean})
+                    logging.info("Final downgraded to partial (azure-active-ingest): %s", text_clean)
+                    continue
 
             pending_partial = ""
             await emit_final(text_clean, "provider")
@@ -644,7 +884,7 @@ def print_input_devices() -> None:
 
 
 async def main() -> None:
-    global INGEST_QUEUE
+    global INGEST_QUEUE, AZURE_STT_RESET_EVENT
 
     cfg = parse_args()
     log_handlers: list[logging.Handler] = [logging.StreamHandler()]
@@ -662,6 +902,7 @@ async def main() -> None:
         return
 
     INGEST_QUEUE = asyncio.Queue(maxsize=512)
+    AZURE_STT_RESET_EVENT = asyncio.Event()
     event_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=512)
 
     logging.info(

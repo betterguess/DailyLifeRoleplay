@@ -37,3 +37,7 @@ stop_pid_file() {
 
 stop_pid_file "logs/transcriber.pid" "transcriber"
 stop_pid_file "logs/streamlit.pid" "streamlit"
+
+# Best-effort cleanup for stale processes not tracked by pid files.
+pkill -f "realtime_transcriber.py" >/dev/null 2>&1 || true
+pkill -f "streamlit run app.py" >/dev/null 2>&1 || true

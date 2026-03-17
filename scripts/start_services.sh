@@ -12,14 +12,20 @@ if [[ ! -x "$VENV_PY" ]]; then
 fi
 
 mkdir -p logs
+
+# Ensure we do not run duplicate service instances.
+if [[ -x "./scripts/stop_services.sh" ]]; then
+  ./scripts/stop_services.sh >/dev/null 2>&1 || true
+fi
+
 rm -f logs/app-speech.log logs/transcriber.log logs/streamlit.log logs/transcriber.pid logs/streamlit.pid
 
 # Optional env defaults for local browser->backend speech flow.
 export TRANSCRIBER_WS="${TRANSCRIBER_WS:-ws://localhost:9000/transcribe}"
-export TRANSCRIBER_INGEST_WS="${TRANSCRIBER_INGEST_WS:-ws://localhost:9000/ingest}"
+export TRANSCRIBER_INGEST_WS="${TRANSCRIBER_INGEST_WS:-auto}"
 export APP_SPEECH_LOG_FILE="${APP_SPEECH_LOG_FILE:-logs/app-speech.log}"
 export STT_LOG_FILE="${STT_LOG_FILE:-logs/transcriber.log}"
-export MIC_SILENCE_RMS="${MIC_SILENCE_RMS:-0.006}"
+export MIC_SILENCE_RMS="${MIC_SILENCE_RMS:-0.002}"
 export DEBUG_MIC="${DEBUG_MIC:-false}"
 
 # Start transcriber (Azure/browser defaults can be overridden via env or args here).
@@ -29,12 +35,12 @@ nohup "$VENV_PY" realtime_transcriber.py \
   --azure-language "${AZURE_SPEECH_LANGUAGE:-da-DK}" \
   --azure-segmentation-silence-ms "${AZURE_SEGMENTATION_SILENCE_MS:-2200}" \
   --log-file "$STT_LOG_FILE" \
-  >> logs/transcriber.log 2>&1 &
+  >> logs/transcriber-stdout.log 2>&1 &
 TRANSCRIBER_PID=$!
 echo "$TRANSCRIBER_PID" > logs/transcriber.pid
 
 # Start Streamlit app.
-nohup "$VENV_PY" -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0 \
+nohup "$VENV_PY" -m streamlit run app.py --server.port 8501 --server.address 127.0.0.1 \
   >> logs/streamlit.log 2>&1 &
 STREAMLIT_PID=$!
 echo "$STREAMLIT_PID" > logs/streamlit.pid

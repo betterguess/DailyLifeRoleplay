@@ -42,7 +42,7 @@ from src.tts import build_speak, ensure_hover_tts_server, start_tts_server
 TRANSCRIBER_WS = os.getenv("TRANSCRIBER_WS", "ws://localhost:9000/transcribe")
 TRANSCRIBER_INGEST_WS = os.getenv(
     "TRANSCRIBER_INGEST_WS",
-    TRANSCRIBER_WS.replace("/transcribe", "/ingest"),
+    "auto",
 )
 HOVER_TTS_PORT = 8765
 
@@ -376,14 +376,17 @@ def _looks_like_assistant_echo(transcript: str) -> bool:
 
     similarity = difflib.SequenceMatcher(None, a, b).ratio()
     in_guard_window = time.time() < float(st.session_state.get("speech_ignore_until", 0.0))
+    short_user_reply = len(a) <= 10 or len(a.split()) <= 2
 
     # During guard window, only suppress if the transcript is very close to
     # the assistant's most recent spoken reply.
     if in_guard_window:
-        return a == b or a in b or b in a or similarity >= 0.78
+        if short_user_reply:
+            return a == b or similarity >= 0.95
+        return a == b or similarity >= 0.84
 
     # Outside the guard window we still suppress near-identical repeats.
-    return a == b or similarity >= 0.90
+    return a == b or similarity >= 0.94
 
 
 def _speak_async(text: str) -> None:
@@ -973,7 +976,7 @@ mic_script = _load_frontend_script(
         "__LISTENING__": "true" if st.session_state.listening else "false",
         "__INGEST_WS__": TRANSCRIBER_INGEST_WS,
         "__DEBUG_MIC__": "true" if os.getenv("DEBUG_MIC", "").strip().lower() in {"1", "true", "yes", "on"} else "false",
-        "__MIC_SILENCE_RMS__": os.getenv("MIC_SILENCE_RMS", "0.006"),
+        "__MIC_SILENCE_RMS__": os.getenv("MIC_SILENCE_RMS", "0.002"),
     },
 )
 

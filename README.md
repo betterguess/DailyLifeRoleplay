@@ -77,7 +77,11 @@ Start app + transcriber together (clears logs first):
 ./scripts/start_services.sh
 # stop again:
 ./scripts/stop_services.sh
+# restart:
+./scripts/restart_services.sh
 ```
+
+Open the app at `http://localhost:8501` (not `0.0.0.0`) to ensure browser microphone access works reliably.
 
 Browser microphone is streamed to:
 ```
@@ -108,7 +112,9 @@ Use `--azure-allow-fallback-final` only if you explicitly want fallback finals.
 
 Optional browser mic silence gate (helps fallback detect idle):
 ```bash
-export MIC_SILENCE_RMS=0.006
+export MIC_SILENCE_RMS=0.002
+# if speech is still dropped (for example with in-ear/Bluetooth mics):
+export MIC_SILENCE_RMS=0
 ```
 
 Write transcriber logs to file:

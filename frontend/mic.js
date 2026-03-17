@@ -3,9 +3,16 @@ const SHOULD_LISTEN = __LISTENING__;
 const INGEST_WS = "__INGEST_WS__";
 const DEBUG_MIC = __DEBUG_MIC__;
 const TARGET_SR = 16000;
-const SILENCE_RMS_THRESHOLD = __MIC_SILENCE_RMS__;
+const SILENCE_RMS_THRESHOLD = Number(__MIC_SILENCE_RMS__) || 0;
 const root = (window.parent && window.parent.window) ? window.parent.window : window;
 const LOG_PREFIX = "[mic]";
+
+function resolveIngestWs() {
+  if (INGEST_WS && INGEST_WS !== "auto") return INGEST_WS;
+  const proto = root.location && root.location.protocol === "https:" ? "wss" : "ws";
+  const host = (root.location && root.location.hostname) ? root.location.hostname : "localhost";
+  return `${proto}://${host}:9000/ingest`;
+}
 
 function logInfo(message, extra) {
   if (!DEBUG_MIC) return;
@@ -81,6 +88,7 @@ function ensureMicState() {
       watchdogTimer: null,
       lastProcessAt: 0,
       lastSentAt: 0,
+      lastVoiceAt: 0,
     };
   }
   return root.__dlrMic;
@@ -120,7 +128,13 @@ function wireProcessor(state, audioCtx, processor) {
 
       const input = event.inputBuffer.getChannelData(0);
       const downsampled = downsampleTo16k(input, audioCtx.sampleRate);
-      if (rms(downsampled) < SILENCE_RMS_THRESHOLD) {
+      const level = rms(downsampled);
+      const voiceMarker = SILENCE_RMS_THRESHOLD > 0 ? SILENCE_RMS_THRESHOLD * 1.2 : 0.012;
+      if (level >= voiceMarker) {
+        state.lastVoiceAt = Date.now();
+      }
+
+      if (SILENCE_RMS_THRESHOLD > 0 && level < SILENCE_RMS_THRESHOLD) {
         return;
       }
       const pcm = toInt16Buffer(downsampled);
@@ -133,7 +147,9 @@ function wireProcessor(state, audioCtx, processor) {
 }
 
 async function openIngestSocket() {
-  const ws = new root.WebSocket(INGEST_WS);
+  const targetWs = resolveIngestWs();
+  logInfo("opening websocket", { url: targetWs });
+  const ws = new root.WebSocket(targetWs);
   ws.binaryType = "arraybuffer";
   ws.onerror = (event) => {
     logError("websocket error", event);
@@ -177,12 +193,11 @@ async function startMic(state) {
   state.connecting = true;
   logInfo("startMic attempt");
   try {
+    const { stream, audioCtx, source, processor } = await createAudioGraph();
     const ws = await openIngestSocket();
+
     state.ws = ws;
     logInfo("websocket connected");
-
-    const { stream, audioCtx, source, processor } = await createAudioGraph();
-    wireProcessor(state, audioCtx, processor);
 
     state.stream = stream;
     state.audioCtx = audioCtx;
@@ -191,6 +206,9 @@ async function startMic(state) {
     state.started = true;
     state.lastProcessAt = Date.now();
     state.lastSentAt = Date.now();
+    state.lastVoiceAt = 0;
+
+    wireProcessor(state, audioCtx, processor);
 
     ws.onclose = () => {
       const wasStarted = state.started;
@@ -212,7 +230,16 @@ async function startMic(state) {
 }
 
 function ensureWatchdog(state) {
-  if (state.watchdogTimer) return;
+  // Streamlit re-renders this component frequently. Rebind watchdog each
+  // render so callbacks always point at the current script instance.
+  if (state.watchdogTimer) {
+    try {
+      root.clearInterval(state.watchdogTimer);
+    } catch (error) {
+      // ignore timer cleanup errors
+    }
+    state.watchdogTimer = null;
+  }
 
   state.watchdogTimer = root.setInterval(() => {
     if (state.desiredListening) {
@@ -221,18 +248,26 @@ function ensureWatchdog(state) {
       const micLive = streamTracks.some((track) => track.readyState === "live");
       const now = Date.now();
       const stalledProcessor = state.started && state.lastProcessAt > 0 && (now - state.lastProcessAt) > 3000;
+      const staleTransport = (
+        state.started
+        && state.lastVoiceAt > 0
+        && (now - state.lastVoiceAt) < 4000
+        && state.lastSentAt > 0
+        && (now - state.lastSentAt) > 4000
+      );
       const audioSuspended = state.audioCtx && state.audioCtx.state && state.audioCtx.state !== "running";
 
       if (audioSuspended && state.audioCtx && typeof state.audioCtx.resume === "function") {
         state.audioCtx.resume().catch(() => {});
       }
 
-      if (!state.started || !wsOpen || !micLive || stalledProcessor) {
+      if (!state.started || !wsOpen || !micLive || stalledProcessor || staleTransport) {
         logInfo("watchdog restart", {
           started: state.started,
           wsOpen: Boolean(wsOpen),
           micLive,
           stalledProcessor,
+          staleTransport,
           audioState: state.audioCtx ? state.audioCtx.state : "none",
           msSinceProcess: state.lastProcessAt ? now - state.lastProcessAt : null,
           msSinceSent: state.lastSentAt ? now - state.lastSentAt : null,
